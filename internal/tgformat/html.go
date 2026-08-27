@@ -22,7 +22,7 @@ type htmlEntityRange struct {
 // MarkdownToHTML converts CommonMark input to renderer-owned Telegram HTML and
 // returns the matching markup-free fallback text.
 func MarkdownToHTML(markdown string) (string, string) {
-	converted := tgmd.Convert(protectRawHTMLFromMarkdown(strings.TrimSpace(markdown)))
+	converted := tgmd.Convert(protectRawHTMLFromMarkdown(telegramReadableMarkdownTables(strings.TrimSpace(markdown))))
 	converted.Text = restoreProtectedHTMLCharacters(converted.Text)
 	rendered := model.RenderedMessage{Text: converted.Text, Entities: convertEntities(converted.Entities)}
 	return RenderedToHTML(rendered), converted.Text

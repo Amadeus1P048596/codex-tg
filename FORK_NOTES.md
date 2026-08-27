@@ -33,6 +33,9 @@ respective owners.
 - Adds Telegram photo input through App Server `localImage`, isolated spawned
   App Server homes through `CTR_GO_CODEX_HOME`, and Windows archive-path
   compatibility.
+- Adapts Markdown pipe tables into mobile-readable Telegram records and keeps
+  photo inputs alive for bounded asynchronous App Server ingestion before
+  private temporary-file cleanup.
 - Uses independent Desktop and Telegram sessions while allowing an explicitly
   linked capability layer and a separate user-approved durable-memory store.
 - Adds ADRs, feature briefs, contract documentation, and regression tests for

@@ -127,8 +127,10 @@ Tools file, full-log, or a future verbose/debug mode.
   download it to a private temporary input directory.
 - Submit the caption plus an App Server `localImage` user input. If no caption
   is present, use a short default image-analysis prompt.
-- Limit downloads to 20 MiB and remove temporary files after App Server accepts
-  the turn request.
+- Limit downloads to 20 MiB. After App Server accepts the turn request, retain
+  the private temporary file for 30 minutes so asynchronous `localImage` reads
+  remain valid, then remove it. Startup and later downloads remove matching
+  files older than 24 hours.
 - Do not create a separate `Photo received` or User card. The turn follows the
   same typing-to-Working lifecycle.
 - This slice supports one Telegram photo on an already routed or reply-targeted
@@ -152,9 +154,11 @@ Tools file, full-log, or a future verbose/debug mode.
   four-second edit throttling, terminal in-place edit, de-duplicated audible
   completion notice, and long-final overflow.
 - Renderer tests cover HTML safety, Chinese, emoji/UTF-16, Windows paths,
-  Markdown, code, and plain-text fallback.
+  Markdown, code, pipe-table-to-labeled-record conversion, and plain-text
+  fallback.
 - Photo tests cover Telegram file lookup/download, largest-size selection,
-  caption/default prompt, and App Server `localImage` serialization.
+  caption/default prompt, App Server `localImage` serialization, bounded
+  post-dispatch retention, and stale cleanup.
 - Full `go test ./...`, `go build -buildvcs=false ./...`, and
   `git diff --check` pass before shadow deployment or cutover.
 - Shadow validation must not start a second `getUpdates` poller with the live bot

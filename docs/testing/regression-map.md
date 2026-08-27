@@ -321,6 +321,11 @@ Contract notes:
   and may continue in separate `Codex · Result` messages.
 - Photo input uses Telegram `getFile` plus App Server `localImage`; no photo
   receipt or User card is created.
+- A successfully dispatched photo remains on disk for the bounded App Server
+  asynchronous-read window, then scheduled cleanup removes it; stale cleanup
+  touches only expired `telegram-photo-*` inputs.
+- Markdown pipe tables outside fenced code become labeled Telegram list
+  records in both entity and HTML render paths. Fenced examples stay literal.
 - Explicit exports and direct command/menu responses are silent.
 - Legacy Tool/Output views are diagnostic drill-down surfaces only.
 - One chat/topic has one foreground thread. Background progress produces no
@@ -471,6 +476,25 @@ Contract notes:
 - Missing App Server fields and literal `"<nil>"` are nil-like values, not display text.
 - Telegram rendering must clean nil-like values before Markdown/entity conversion.
 - Diagnostics for `telegram_render_contains_nil` are bounded and hash-only.
+
+## Telegram Table And Photo Input Safety
+
+Primary tests:
+
+- `internal/tgformat/markdown_test.go::TestRenderSegmentsConvertsPipeTableToTelegramReadableRecords`
+- `internal/tgformat/markdown_test.go::TestRenderSegmentsLeavesPipeTableSyntaxInsideCodeFenceUntouched`
+- `internal/tgformat/markdown_test.go::TestMarkdownToHTMLConvertsPipeTableToTelegramReadableRecords`
+- `internal/telegram/bot_test.go::TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored`
+- `internal/telegram/bot_test.go::TestRemoveStaleTelegramTempFilesRemovesOnlyExpiredPhotoInputs`
+
+Contract notes:
+
+- Telegram has no native table entity. Preserve information by rendering every
+  source row as a mobile-readable record with explicit column labels.
+- Do not rewrite pipe syntax inside fenced code blocks.
+- App Server RPC acceptance does not prove that an asynchronous `localImage`
+  read has finished. Keep the private input for 30 minutes, schedule deletion,
+  and remove matching leftovers older than 24 hours.
 
 ## Diagnostics And Sanitization
 

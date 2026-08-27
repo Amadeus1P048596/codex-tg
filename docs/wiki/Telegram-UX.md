@@ -105,12 +105,23 @@ A pure Telegram photo or photo with a caption is accepted on a routed or
 reply-targeted thread. The bot chooses the largest Telegram photo variant,
 downloads up to 20 MiB into a private temporary directory, and starts or steers
 the turn with the caption plus an App Server `localImage` input. With no caption,
-it supplies a short default image-analysis prompt. Temporary input files are
-removed after the App Server accepts the request, and no separate media-receipt
-card is created.
+it supplies a short default image-analysis prompt. The private temporary input
+remains available for 30 minutes after dispatch because App Server may read a
+`localImage` asynchronously after accepting the RPC. Scheduled cleanup removes
+it afterward; startup and later downloads also remove matching files older than
+24 hours. No separate media-receipt card is created.
 
 Media groups and photo-first `/newchat` or `/newthread` creation are not covered
 by this implementation slice.
+
+## Markdown Tables
+
+Telegram has no native table entity and proportional mobile fonts make raw pipe
+tables hard to read. Outside fenced code blocks, the renderer rewrites a
+GitHub-style Markdown pipe table into one labeled list record per source row.
+Column names become field labels, while inline code and other supported Markdown
+inside cells continue through the normal Telegram entity converter. Pipe-table
+examples inside fenced code blocks remain unchanged.
 
 ## Plan Mode
 

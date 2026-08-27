@@ -17,18 +17,21 @@ import (
 )
 
 const (
-	telegramMessageLimit = 4096
-	telegramPhotoMaxSize = int64(20 << 20)
+	telegramMessageLimit   = 4096
+	telegramPhotoMaxSize   = int64(20 << 20)
+	telegramPhotoRetention = 30 * time.Minute
+	telegramPhotoStaleAge  = 24 * time.Hour
 )
 
 var telegramBotTokenURLPattern = regexp.MustCompile(`bot[0-9]+:[A-Za-z0-9_-]+`)
 
 type Bot struct {
-	cfg     config.Config
-	client  *Client
-	service *daemon.Service
-	logger  *log.Logger
-	me      *User
+	cfg                  config.Config
+	client               *Client
+	service              *daemon.Service
+	logger               *log.Logger
+	me                   *User
+	schedulePhotoCleanup func([]string, time.Duration)
 }
 
 type Document struct {
@@ -54,6 +57,7 @@ func NewBot(cfg config.Config, service *daemon.Service, logger *log.Logger) (*Bo
 }
 
 func (b *Bot) Start(ctx context.Context) error {
+	b.cleanupStaleTelegramPhotoInputs()
 	startCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	me, err := b.client.GetMe(startCtx)
@@ -66,6 +70,16 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 	b.logger.Printf("telegram bot ready: @%s", me.Username)
 	return nil
+}
+
+func (b *Bot) cleanupStaleTelegramPhotoInputs() {
+	if strings.TrimSpace(b.cfg.Paths.DataDir) == "" {
+		return
+	}
+	directory := filepath.Join(b.cfg.Paths.DataDir, "telegram-inputs")
+	if err := removeStaleTelegramTempFiles(directory, time.Now().Add(-telegramPhotoStaleAge)); err != nil && b.logger != nil {
+		b.logger.Printf("telegram stale photo cleanup failed: %s", sanitizeTelegramLogError(err))
+	}
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -263,11 +277,12 @@ func (b *Bot) handleMessage(ctx context.Context, message Message) error {
 	if err != nil {
 		return b.sendFailureMessage(ctx, message.Chat.ID, message.MessageThreadID, err)
 	}
-	defer removeTelegramTempFiles(localImages)
 	response, err := b.service.HandleMessageWithLocalImages(ctx, message.Chat.ID, message.MessageThreadID, message.From.ID, text, localImages, replyTo)
 	if err != nil {
+		removeTelegramTempFiles(localImages)
 		return b.sendFailureMessage(ctx, message.Chat.ID, message.MessageThreadID, err)
 	}
+	b.retainTelegramTempFiles(localImages)
 	return b.deliverDirectResponse(ctx, message.Chat.ID, message.MessageThreadID, response)
 }
 
@@ -299,6 +314,7 @@ func (b *Bot) downloadMessagePhotos(ctx context.Context, photos []PhotoSize) ([]
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, err
 	}
+	_ = removeStaleTelegramTempFiles(directory, time.Now().Add(-telegramPhotoStaleAge))
 	temp, err := os.CreateTemp(directory, "telegram-photo-*.jpg")
 	if err != nil {
 		return nil, err
@@ -345,6 +361,46 @@ func removeTelegramTempFiles(paths []string) {
 			_ = os.Remove(path)
 		}
 	}
+}
+
+func (b *Bot) retainTelegramTempFiles(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	retained := append([]string(nil), paths...)
+	if b.schedulePhotoCleanup != nil {
+		b.schedulePhotoCleanup(retained, telegramPhotoRetention)
+		return
+	}
+	time.AfterFunc(telegramPhotoRetention, func() {
+		removeTelegramTempFiles(retained)
+	})
+}
+
+func removeStaleTelegramTempFiles(directory string, olderThan time.Time) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "telegram-photo-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.ModTime().Before(olderThan) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func firstNonEmptyTelegram(values ...string) string {

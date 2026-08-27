@@ -9,6 +9,11 @@
   dedicated `CTR_GO_CODEX_HOME` by default while preserving existing configs.
 - Renamed Telegram writer actions to describe live-session behavior inside the
   isolated runtime instead of implying a Desktop-to-Telegram handoff.
+- Rewrites GitHub-style Markdown pipe tables as labeled Telegram list records
+  while preserving inline formatting and fenced-code examples.
+- Keeps private Telegram photo inputs available for a bounded post-dispatch
+  window so App Server can read them asynchronously, with scheduled and stale
+  file cleanup.
 
 ## v0.5.0-amadeus.1 - 2026-08-27
 

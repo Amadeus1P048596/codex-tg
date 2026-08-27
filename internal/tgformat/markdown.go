@@ -46,7 +46,7 @@ func RenderSegments(segments []Segment, maxLen int) []model.RenderedMessage {
 			continue
 		}
 		offset := tgmd.UTF16Len(text.String())
-		converted := tgmd.Convert(segment.Markdown)
+		converted := tgmd.Convert(telegramReadableMarkdownTables(segment.Markdown))
 		text.WriteString(converted.Text)
 		for _, entity := range converted.Entities {
 			entity.Offset += offset

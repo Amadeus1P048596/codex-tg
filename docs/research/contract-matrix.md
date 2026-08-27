@@ -169,6 +169,11 @@ Adapter routing:
   activities. Fast incidental tools usually contribute only to the operation count.
 - Telegram photos on routed threads use the largest available size and App
   Server `localImage`; they do not create a separate receipt card.
+- Private Telegram photo inputs remain readable for 30 minutes after dispatch
+  because App Server ingestion may be asynchronous; scheduled cleanup removes
+  them, and matching files older than 24 hours are treated as stale.
+- Outside fenced code blocks, GitHub-style Markdown pipe tables render as
+  per-row labeled Telegram list records rather than raw aligned text.
 - Telegram-visible text must never render literal `"<nil>"`. Missing, null, empty, or nil-like App Server fields are treated as absent and must be cleaned before Markdown/entity conversion.
 
 ## Callback / button surface from the oracle

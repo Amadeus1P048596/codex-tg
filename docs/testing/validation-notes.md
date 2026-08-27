@@ -1,5 +1,15 @@
 # Validation Notes
 
+- 2026-08-27 CST Telegram table/photo-input validation rewrote GFM pipe tables
+  outside fenced code into labeled mobile records across both entity and HTML
+  render paths. Successfully dispatched private photo inputs now remain readable
+  for 30 minutes for asynchronous App Server ingestion, with scheduled cleanup
+  and 24-hour stale-file cleanup. Targeted renderer/transport tests, full
+  `go test ./...`, `go build -buildvcs=false ./...`, `git diff --check`, and the
+  public secret-pattern scan passed. Three consecutive deployment checks still
+  observed an active Telegram turn, so the installed Windows daemon was not
+  forcibly restarted; real table and photo readback remains pending.
+
 - 2026-08-27 CST runtime-boundary review confirmed that Windows Codex Desktop
   and Telegram run separate App Server processes and private mutable
   `CODEX_HOME` state, while selected capabilities and an application-level

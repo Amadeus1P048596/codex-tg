@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/daemon"
@@ -220,7 +221,17 @@ func TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored(t *testing.T) {
 	client := NewClient("token")
 	client.baseURL = server.URL
 	client.fileBaseURL = server.URL
-	bot := &Bot{cfg: cfg, client: client, service: service}
+	var scheduledPaths []string
+	var scheduledDelay time.Duration
+	bot := &Bot{
+		cfg:     cfg,
+		client:  client,
+		service: service,
+		schedulePhotoCleanup: func(paths []string, delay time.Duration) {
+			scheduledPaths = append([]string(nil), paths...)
+			scheduledDelay = delay
+		},
+	}
 	err = bot.handleMessage(context.Background(), Message{
 		MessageID: 1,
 		From:      &User{ID: 7},
@@ -240,8 +251,56 @@ func TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir telegram-inputs failed: %v", err)
 	}
+	if len(entries) != 1 {
+		t.Fatalf("temporary photo inputs = %#v, want retained input for asynchronous App Server read", entries)
+	}
+	if got, want := scheduledDelay, telegramPhotoRetention; got != want {
+		t.Fatalf("scheduled cleanup delay = %s, want %s", got, want)
+	}
+	if len(scheduledPaths) != 1 {
+		t.Fatalf("scheduled cleanup paths = %#v, want one path", scheduledPaths)
+	}
+	if _, err := os.Stat(scheduledPaths[0]); err != nil {
+		t.Fatalf("retained photo is unavailable immediately after dispatch: %v", err)
+	}
+	removeTelegramTempFiles(scheduledPaths)
+	entries, err = os.ReadDir(filepath.Join(root, "data", "telegram-inputs"))
+	if err != nil {
+		t.Fatalf("ReadDir telegram-inputs after cleanup failed: %v", err)
+	}
 	if len(entries) != 0 {
-		t.Fatalf("temporary photo inputs were not removed: %#v", entries)
+		t.Fatalf("scheduled cleanup did not remove temporary photo inputs: %#v", entries)
+	}
+}
+
+func TestRemoveStaleTelegramTempFilesRemovesOnlyExpiredPhotoInputs(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	oldPhoto := filepath.Join(directory, "telegram-photo-old.jpg")
+	freshPhoto := filepath.Join(directory, "telegram-photo-fresh.jpg")
+	unrelated := filepath.Join(directory, "keep-me.txt")
+	for _, path := range []string{oldPhoto, freshPhoto, unrelated} {
+		if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) failed: %v", filepath.Base(path), err)
+		}
+	}
+	now := time.Now()
+	oldTime := now.Add(-telegramPhotoStaleAge - time.Minute)
+	if err := os.Chtimes(oldPhoto, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes(oldPhoto) failed: %v", err)
+	}
+
+	if err := removeStaleTelegramTempFiles(directory, now.Add(-telegramPhotoStaleAge)); err != nil {
+		t.Fatalf("removeStaleTelegramTempFiles failed: %v", err)
+	}
+	if _, err := os.Stat(oldPhoto); !os.IsNotExist(err) {
+		t.Fatalf("old photo stat error = %v, want not exist", err)
+	}
+	for _, path := range []string{freshPhoto, unrelated} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("retained file %s stat failed: %v", filepath.Base(path), err)
+		}
 	}
 }
 
