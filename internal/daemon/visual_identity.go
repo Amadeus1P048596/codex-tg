@@ -7,9 +7,11 @@ import (
 	"hash/fnv"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/mideco-tech/codex-tg/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/tgformat"
 )
 
 const (
@@ -28,6 +30,130 @@ var visualMarkerPalette = []string{
 type visualMarkerAssignment struct {
 	Marker        string `json:"marker"`
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
+}
+
+type visualCardHeaderView struct {
+	Text     string
+	Entities []model.MessageEntity
+}
+
+type visualCardHeaderBuilder struct {
+	text     strings.Builder
+	entities []model.MessageEntity
+}
+
+func (s *Service) visualCardHeader(ctx context.Context, kind string, thread model.Thread, turnID, status, timing string) visualCardHeaderView {
+	marker := s.visualMarker(ctx, thread.ID)
+	project := compactVisualLabel(firstNonEmpty(thread.ProjectName, "Project"), visualProjectMaxRunes)
+	title := compactVisualLabel(firstNonEmpty(thread.Title, thread.ShortID()), visualThreadMaxRunes)
+	role := visualRole(kind)
+
+	var builder visualCardHeaderBuilder
+	builder.add(marker+" ", "")
+	builder.add(title, "bold")
+	builder.add("\n", "")
+	builder.add(role, "bold")
+	if status = strings.TrimSpace(status); status != "" {
+		builder.add(" · ", "")
+		builder.add(visualStatus(status), "bold")
+	}
+	if timing = strings.TrimSpace(timing); timing != "" {
+		builder.add(" · ", "")
+		builder.add("⏱ "+timing, "bold")
+	}
+	builder.add("\n", "")
+	metadata := []string{project, "T:" + visualShortID(thread.ID)}
+	if shortTurnID := visualShortID(turnID); shortTurnID != "" {
+		metadata = append(metadata, "R:"+shortTurnID)
+	}
+	builder.add(strings.Join(metadata, " · "), "code")
+	return visualCardHeaderView{Text: builder.text.String(), Entities: builder.entities}
+}
+
+func visualRole(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "user":
+		return "👤 [User]"
+	case "final":
+		return "🤖 [Final]"
+	case "commentary":
+		return "💬 [commentary]"
+	case "plan":
+		return "🧭 [Plan]"
+	case "details":
+		return "📋 [Details]"
+	default:
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			kind = "Message"
+		}
+		return "💬 " + kind
+	}
+}
+
+func visualStatus(status string) string {
+	status = strings.TrimSpace(status)
+	lower := strings.ToLower(status)
+	switch {
+	case lower == "completed" || lower == "complete" || lower == "success":
+		return "✅ Status: " + status
+	case strings.Contains(lower, "progress") || lower == "active" || lower == "running":
+		return "⏳ Status: " + status
+	case strings.Contains(lower, "waiting") || strings.Contains(lower, "input"):
+		return "❓ Status: " + status
+	case strings.Contains(lower, "fail") || strings.Contains(lower, "error") || lower == "interrupted":
+		return "⚠️ Status: " + status
+	default:
+		return "Status: " + status
+	}
+}
+
+func (b *visualCardHeaderBuilder) add(text, entityType string) {
+	if text == "" {
+		return
+	}
+	offset := visualUTF16Len(b.text.String())
+	b.text.WriteString(text)
+	if entityType == "" {
+		return
+	}
+	b.entities = append(b.entities, model.MessageEntity{
+		Type:   entityType,
+		Offset: offset,
+		Length: visualUTF16Len(text),
+	})
+}
+
+func visualUTF16Len(text string) int {
+	length := 0
+	for _, value := range text {
+		length += utf16.RuneLen(value)
+	}
+	return length
+}
+
+func renderMarkdownWithVisualHeader(header visualCardHeaderView, markdown string) []model.RenderedMessage {
+	return applyVisualHeaderEntities(tgformat.RenderMarkdownWithHeader(header.Text, markdown), header)
+}
+
+func renderSegmentsWithVisualHeader(header visualCardHeaderView, segments []tgformat.Segment, maxLen int) []model.RenderedMessage {
+	return applyVisualHeaderEntities(tgformat.RenderSegments(segments, maxLen), header)
+}
+
+func applyVisualHeaderEntities(messages []model.RenderedMessage, header visualCardHeaderView) []model.RenderedMessage {
+	if len(header.Entities) == 0 {
+		return messages
+	}
+	for index := range messages {
+		if !strings.HasPrefix(messages[index].Text, header.Text) {
+			continue
+		}
+		entities := make([]model.MessageEntity, 0, len(header.Entities)+len(messages[index].Entities))
+		entities = append(entities, header.Entities...)
+		entities = append(entities, messages[index].Entities...)
+		messages[index].Entities = entities
+	}
+	return messages
 }
 
 func (s *Service) visualHeader(ctx context.Context, kind string, thread model.Thread, turnID string) string {

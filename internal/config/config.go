@@ -47,7 +47,9 @@ func (p Paths) Ensure() error {
 type Config struct {
 	Paths                       Paths
 	CodexBin                    string
+	CodexHome                   string
 	AppServerListen             string
+	FullAccess                  bool
 	TelegramBotToken            string
 	AllowedUserIDs              []int64
 	AllowedChatIDs              []int64
@@ -131,7 +133,9 @@ func fromSource(source envSource) Config {
 	return Config{
 		Paths:                       paths,
 		CodexBin:                    codexBin,
+		CodexHome:                   source.path("CTR_GO_CODEX_HOME", ""),
 		AppServerListen:             listen,
+		FullAccess:                  source.bool("CTR_GO_FULL_ACCESS", false),
 		TelegramBotToken:            source.first("CTR_GO_TELEGRAM_BOT_TOKEN", "CTR_TELEGRAM_BOT_TOKEN"),
 		AllowedUserIDs:              parseInt64List(source.first("CTR_GO_ALLOWED_USER_IDS", "CTR_ALLOWED_USER_IDS")),
 		AllowedChatIDs:              parseInt64List(source.first("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),
@@ -158,7 +162,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		Home                        string  `json:"home"`
 		DBPath                      string  `json:"db_path"`
 		CodexBin                    string  `json:"codex_bin"`
+		CodexHome                   string  `json:"codex_home"`
 		AppServerListen             string  `json:"app_server_listen"`
+		FullAccess                  bool    `json:"full_access"`
 		HasTelegramToken            bool    `json:"telegram_configured"`
 		AllowedUserIDs              []int64 `json:"allowed_user_ids"`
 		AllowedChatIDs              []int64 `json:"allowed_chat_ids"`
@@ -179,7 +185,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		Home:                        c.Paths.Home,
 		DBPath:                      c.Paths.DBPath,
 		CodexBin:                    c.CodexBin,
+		CodexHome:                   c.CodexHome,
 		AppServerListen:             c.AppServerListen,
+		FullAccess:                  c.FullAccess,
 		HasTelegramToken:            c.TelegramBotToken != "",
 		AllowedUserIDs:              c.AllowedUserIDs,
 		AllowedChatIDs:              c.AllowedChatIDs,
@@ -253,12 +261,23 @@ func ParseEnvFile(data []byte, name string) (map[string]string, error) {
 func parseEnvFileValue(raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		inner := value[1 : len(value)-1]
+		if isLiteralWindowsPath(inner) {
+			return inner, nil
+		}
 		return strconv.Unquote(value)
 	}
 	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
 		return value[1 : len(value)-1], nil
 	}
 	return value, nil
+}
+
+func isLiteralWindowsPath(value string) bool {
+	if len(value) >= 3 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' && value[2] == '\\' {
+		return len(value) == 3 || value[3] != '\\'
+	}
+	return strings.HasPrefix(value, `\\`) && !strings.HasPrefix(value, `\\\\`)
 }
 
 func validEnvKey(key string) bool {

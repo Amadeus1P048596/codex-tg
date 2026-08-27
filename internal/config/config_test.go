@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,22 @@ func TestMarshalJSONIncludesNotifyNewRun(t *testing.T) {
 	}
 	if got["notify_new_run"] != true {
 		t.Fatalf("notify_new_run = %#v, want true", got["notify_new_run"])
+	}
+}
+
+func TestMarshalJSONIncludesCodexHome(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(Config{CodexHome: `C:\profiles\codex-tg`})
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if got["codex_home"] != `C:\profiles\codex-tg` {
+		t.Fatalf("codex_home = %#v, want isolated path", got["codex_home"])
 	}
 }
 
@@ -71,14 +88,42 @@ func TestParseEnvFileRejectsInvalidLine(t *testing.T) {
 	}
 }
 
+func TestParseEnvFilePreservesQuotedWindowsPath(t *testing.T) {
+	t.Parallel()
+
+	const path = `C:\temp\new-home`
+	values, err := ParseEnvFile([]byte(`CTR_GO_CODEX_HOME="`+path+`"`+"\n"), "windows.env")
+	if err != nil {
+		t.Fatalf("ParseEnvFile failed: %v", err)
+	}
+	if got := values["CTR_GO_CODEX_HOME"]; got != path {
+		t.Fatalf("CTR_GO_CODEX_HOME = %q, want %q", got, path)
+	}
+}
+
+func TestParseEnvFileDecodesStrconvQuotedWindowsPath(t *testing.T) {
+	t.Parallel()
+
+	const path = `C:\temp\new-home`
+	values, err := ParseEnvFile([]byte("CTR_GO_CODEX_HOME="+strconv.Quote(path)+"\n"), "windows.env")
+	if err != nil {
+		t.Fatalf("ParseEnvFile failed: %v", err)
+	}
+	if got := values["CTR_GO_CODEX_HOME"]; got != path {
+		t.Fatalf("CTR_GO_CODEX_HOME = %q, want %q", got, path)
+	}
+}
+
 func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.env")
 	fileDefaultCWD := filepath.Join(dir, "from-file")
 	envDefaultCWD := filepath.Join(dir, "from-env")
 	home := filepath.Join(dir, "home")
+	codexHome := filepath.Join(dir, "codex-home")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
 		`CTR_GO_HOME="` + home + `"`,
+		`CTR_GO_CODEX_HOME="` + codexHome + `"`,
 		`CTR_GO_TELEGRAM_BOT_TOKEN="file-token"`,
 		`CTR_GO_ALLOWED_USER_IDS="101 202"`,
 		`CTR_GO_DEFAULT_CWD="` + fileDefaultCWD + `"`,
@@ -105,6 +150,9 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	}
 	if cfg.Paths.Home != home {
 		t.Fatalf("Home = %q, want %q", cfg.Paths.Home, home)
+	}
+	if cfg.CodexHome != codexHome {
+		t.Fatalf("CodexHome = %q, want %q", cfg.CodexHome, codexHome)
 	}
 	if cfg.NotifyNewRun {
 		t.Fatal("NotifyNewRun = true, want false from config file")

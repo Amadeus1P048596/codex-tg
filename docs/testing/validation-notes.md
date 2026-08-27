@@ -1,5 +1,82 @@
 # Validation Notes
 
+- 2026-08-26 CST interactive session creation now collects an explicit title
+  before a distinct first prompt for `/newchat` and `/newthread`, persists both
+  stages across restart, derives interactive Chat folders from the title, and
+  writes the title through to App Server. Short foreground completions retain
+  the stable in-place card and add one de-duplicated audible terminal notice;
+  fast terminal cards and separately sent long results remain single-notice
+  paths. Targeted tests, full `go test ./...`, `go build -buildvcs=false ./...`,
+  `git diff --check`, Python live-harness syntax validation, and the targeted
+  secret/local scan passed. The Windows candidate and rollback copy are staged;
+  the cutover is waiting for three consecutive idle checks, so live Telegram
+  title/prompt and completion-notice readback is still pending.
+
+- 2026-08-26 CST Telegram session-hub validation added `/home`, a persistent
+  `/inbox`, foreground activation for newly created sessions, post-archive and
+  post-restore next actions, user-owned title locking, active-session archive
+  protection, and consistent Chinese copy on primary cards and buttons. Targeted
+  navigation/admin tests plus full `go test ./...`, `go build -buildvcs=false
+  ./...`, `git diff --check`, and the targeted secret/local scan passed. The
+  rollback-capable Windows cutover waited for three consecutive idle checks,
+  preserved the prior binary/config, and started the replacement with both App
+  Server sessions ready, no daemon error, and zero delivery backlog. Telegram
+  Bot API readback confirmed the new `home`, `inbox`, `current`, `title`,
+  `archive`, and `unarchive` commands, and accepted the HTML completion notice.
+
+- 2026-08-26 CST Telegram session administration validation added prompt-title
+  fallback with UUID/generic-placeholder protection, `/current`, write-through
+  `/title` with in-place card refresh, confirmed current-session `/archive`, and
+  App Server-backed `/unarchive` with ten-row cursor pagination and title-button
+  restore. `/cancel` remains immediate and scoped to pending session creation.
+  Targeted title/current/archive/pagination tests plus full `go test ./...`,
+  `go build -buildvcs=false ./...`, and `git diff --check` passed. A real
+  isolated-home App Server smoke also accepted `thread/list` with
+  `archived=true` and returned the expected paginated response shape. Live
+  Telegram readback remains required after the rollback-capable Windows cutover.
+
+- 2026-08-25 CST single-foreground Telegram session validation made the current
+  Telegram App Server list authoritative for `/threads`, replaced numbered Open
+  rows with Unicode-safe clickable session titles, rejected cached Desktop-only
+  threads, suppressed all background progress cards, de-duplicated compact
+  completion/failed/cancelled/needs-input switch notices, and deleted the old
+  non-terminal card when switching focus. Targeted foreground, stale-cache, and
+  picker tests plus full `go test ./...`, `go build -buildvcs=false ./...`, and
+  `git diff --check` passed. Live Telegram readback remains required after the
+  rollback-capable idle-gated Windows cutover.
+
+- 2026-08-25 CST Activity Card title hotfix added the App Server thread/task
+  title as the primary row and moved Codex/state/duration to the secondary row,
+  with a compact single-row fallback only while no title is available. Renderer
+  escaping/fallback tests, observer integration coverage, full `go test ./...`,
+  `go build -buildvcs=false ./...`, and `git diff --check` passed. Live Telegram
+  readback remains required after the idle-gated hotfix restart.
+
+- 2026-08-25 CST `/newchat` and `/newthread` two-step prompt validation passed
+  targeted tests for arming, chat/topic isolation, cancellation, expiry, restart
+  persistence, inline-command compatibility, and Telegram command-menu exposure.
+  Full `go test ./...`, `go build -buildvcs=false ./...`, and
+  `git diff --check` passed. The rebuilt Windows candidate also passed config
+  readback plus a real isolated-home App Server `initialize` / `thread/list`
+  smoke. Production Telegram readback remains required after idle-gated cutover.
+
+- 2026-08-25 CST Telegram Activity Card pre-cutover validation passed targeted
+  aggregator/lifecycle/renderer/photo tests, full `go test ./...`, Windows build,
+  `git diff --check`, and a real isolated-Codex-home App Server smoke covering
+  `initialize` plus `thread/list`. The isolated home returned zero threads while
+  shared skills/plugins/packages, global config/rules, login, and the independent
+  shared-memory store remained available. The production bot poller was not
+  duplicated during shadow validation. A rollback-capable cutover is deferred
+  until the current Telegram turn is terminal; real Activity Card readback is
+  still required after the replacement daemon starts.
+
+- 2026-08-20 CST Telegram card hierarchy validation rebuilt and restarted the
+  local Windows daemon, then used operator-provided Telegram client readback to
+  confirm the three-row structured header: bold thread title, emphasized role / status /
+  duration, code-styled project plus short thread/turn metadata, and preserved
+  Markdown response body rendering. The observed `interrupted` state belonged
+  to the deployment-interrupted validation turn rather than a rendering fault.
+
 This file captures validation nuances that are useful for agents and maintainers. It is not a list of release blockers.
 
 For feature-to-test ownership, see `docs/testing/regression-map.md`.
@@ -14,9 +91,19 @@ The public docs describe the intended observer/UI contract:
 
 - `/observe all` moves one global observer target.
 - `/observe off` disables passive monitoring.
-- foreign GUI/CLI runs render as `New run -> [User] -> [commentary] -> [Tool] -> [Output]`.
-- completed runs send a new `[Final]` card with Details, leave status on `[commentary]` while active and `[Final]` after completion, then delete transient live cards best-effort.
-- Telegram notifications are intentionally low-noise: only `New run` when enabled, `[Plan]`, and `[Final]` are audible.
+- each turn normally has one activity card after an initial four-second typing period.
+- raw tool/output events are aggregated into recent user-facing activities and
+  non-terminal edits are limited to one every four seconds.
+- completed, failed, cancelled, and input-required states edit the same card;
+  long final content may continue in separate Result messages.
+- the conversation emoji stays stable while textual state changes.
+- routed Telegram photos become App Server `localImage` inputs without a receipt card.
+- `/newchat` and `/newthread` collect a title and then a distinct plain-text
+  prompt, retaining the pending stage for 15 minutes; `/cancel` clears that
+  SQLite-backed chat/topic-scoped state, while the one-line command forms remain
+  supported.
+- short foreground terminal edits add one de-duplicated audible completion
+  notice because Telegram edits alone do not notify.
 - `Tools file` and `Get full log` are explicit on-demand exports.
 
 When changing this behavior, update the ADRs and run both unit tests and a live Telegram E2E path if a bot token is available.
@@ -99,12 +186,12 @@ Validation expectations:
 - unit tests cover nil-like map/slice extraction, command rendering, stale session-tail command suppression, summary Markdown rendering, App Server RPC id stringification, and snapshot string normalization.
 - live validation must read edited Telegram messages, not only newly delivered messages.
 - the checked-in public-safe harness `tests/live_e2e/telegram_readback_e2e.py` exercises sequential `pwd`, `date`, `printf`, a dedicated sleep-20 timing run, and a multi-command math run against a dedicated private test thread configured only through local env.
-- when validating stale-command regressions manually, prefer one private test-thread turn that runs several safe shell commands sequentially as separate tool calls; watch Telegram `MessageEdited` updates and verify `[commentary]` shows whole-run elapsed time while Telegram-origin `[Tool]` shows live `Current tool:` and then settles to `Last completed tool:`.
-- current command visibility is part of the live Telegram-origin contract only when it comes from App Server live events for the matching `thread_id + turn_id`; foreign GUI/CLI observer panels remain completed-tool only.
-- while a run is active, `[commentary]` must show `Run active for: ...`; after Final Card collapse, `[Final]` must show `Run duration: ...`.
+- when validating stale-command regressions manually, prefer one private test-thread turn that runs several safe shell commands sequentially; watch Telegram `MessageEdited` updates and verify the same Working card advances through recent activities without stale-command reversion.
+- current command visibility comes from matching App Server events for the same
+  `thread_id + turn_id` and is limited to one compact command under the current activity.
+- while a run is active, the card shows elapsed time; its terminal header shows total duration.
 - after a later turn completes, delayed live tool notifications from an earlier turn must not create a new observer panel or re-render stale tool/output content.
-- `[Tool]` may show `Current tool:` for a matching Telegram-origin live event. Otherwise it should show `Last completed tool:` when available, or `No completed tool yet.`.
-- `[Output]` should show `Last completed output:` for the same completed tool when output is available.
+- raw Tool/Output and empty-placeholder labels must not appear in the default card.
 - Details view should be checked during E2E when the button is available. For multiple completed runs in one thread, opening `Details` and pressing `Back` on an older Final Card must keep that older card bound to its original turn; stale or mismatched Details callbacks must not render the latest run.
 - Tool-only turns with no commentary and no output must still show completed command/status in Details under `Tool activity`.
 - do not commit Telegram sessions, target thread ids, raw message ids, logs, env files, or screenshots.

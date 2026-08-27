@@ -13,12 +13,18 @@ import (
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
 	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/control"
 	"github.com/mideco-tech/codex-tg/internal/model"
 	"github.com/mideco-tech/codex-tg/internal/storage"
 )
 
 const (
 	newThreadStateTTL                  = 15 * time.Minute
+	pendingNewThreadKindProject        = "project"
+	pendingNewThreadKindChat           = "newchat"
+	pendingNewThreadKindWithoutCWD     = "newthread"
+	pendingNewThreadStageTitle         = "title"
+	pendingNewThreadStagePrompt        = "prompt"
 	chatsProjectName                   = "Chats"
 	defaultProjectsProjectPreviewLimit = 7
 	defaultProjectsChatPreviewLimit    = 3
@@ -39,6 +45,9 @@ type projectWorkspace struct {
 }
 
 type pendingNewThreadState struct {
+	Kind          string `json:"kind,omitempty"`
+	Stage         string `json:"stage,omitempty"`
+	Title         string `json:"title,omitempty"`
 	ProjectName   string `json:"project_name"`
 	DirectoryName string `json:"directory_name,omitempty"`
 	CWD           string `json:"cwd"`
@@ -533,13 +542,25 @@ func (s *Service) armProjectNewThread(ctx context.Context, chatID, topicID int64
 		ProjectName:   workspace.ProjectName,
 		DirectoryName: workspace.DirectoryName,
 		CWD:           workspace.CWD,
-		ExpiresAt:     time.Now().UTC().Add(newThreadStateTTL).Format(time.RFC3339Nano),
 	}
-	payloadBytes, _ := json.Marshal(state)
-	if err := s.store.SetState(ctx, newThreadStateKey(chatID, topicID), string(payloadBytes)); err != nil {
+	return s.armNewThreadPrompt(ctx, chatID, topicID, pendingNewThreadKindProject, state, fmt.Sprintf("为 %s 新建会话。\n请发送首条 prompt。\n\n发送 /cancel 取消。", workspace.ProjectName))
+}
+
+func (s *Service) armNewThreadPrompt(ctx context.Context, chatID, topicID int64, kind string, state pendingNewThreadState, message string) (*DirectResponse, error) {
+	state.Kind = kind
+	if strings.TrimSpace(state.Stage) == "" {
+		state.Stage = pendingNewThreadStagePrompt
+	}
+	if err := s.savePendingNewThreadState(ctx, chatID, topicID, state); err != nil {
 		return nil, err
 	}
-	return &DirectResponse{Text: fmt.Sprintf("New thread for %s.\nSend the first prompt as your next message.", workspace.ProjectName)}, nil
+	return &DirectResponse{Text: message}, nil
+}
+
+func (s *Service) savePendingNewThreadState(ctx context.Context, chatID, topicID int64, state pendingNewThreadState) error {
+	state.ExpiresAt = s.currentTime().Add(newThreadStateTTL).Format(time.RFC3339Nano)
+	payloadBytes, _ := json.Marshal(state)
+	return s.store.SetState(ctx, newThreadStateKey(chatID, topicID), string(payloadBytes))
 }
 
 func (s *Service) newThreadCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
@@ -561,7 +582,10 @@ func (s *Service) newThreadCommand(ctx context.Context, chatID, topicID int64, r
 func (s *Service) newChatCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
 	prompt := strings.TrimSpace(rest)
 	if prompt == "" {
-		return &DirectResponse{Text: "Usage: /newchat <prompt>"}, nil
+		return s.armNewThreadPrompt(ctx, chatID, topicID, pendingNewThreadKindChat, pendingNewThreadState{Stage: pendingNewThreadStageTitle}, "请输入新 Chat 的标题。\n发送后，我会再请你输入首条 prompt。\n\n发送 /cancel 取消。")
+	}
+	if err := s.store.DeleteState(ctx, newThreadStateKey(chatID, topicID)); err != nil {
+		return nil, err
 	}
 	cwd, directoryName, err := createCodexChatCWD(s.codexChatsRoot(), prompt, s.now())
 	if err != nil {
@@ -577,9 +601,31 @@ func (s *Service) newChatCommand(ctx context.Context, chatID, topicID int64, res
 func (s *Service) newThreadWithoutCWDCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
 	prompt := strings.TrimSpace(rest)
 	if prompt == "" {
-		return &DirectResponse{Text: "Usage: /newthread <prompt>"}, nil
+		return s.armNewThreadPrompt(ctx, chatID, topicID, pendingNewThreadKindWithoutCWD, pendingNewThreadState{Stage: pendingNewThreadStageTitle}, "请输入新会话的标题。\n发送后，我会再请你输入首条 prompt。\n\n发送 /cancel 取消。")
+	}
+	if err := s.store.DeleteState(ctx, newThreadStateKey(chatID, topicID)); err != nil {
+		return nil, err
 	}
 	return s.createThreadFromProjectPrompt(ctx, chatID, topicID, pendingNewThreadState{}, prompt)
+}
+
+func (s *Service) cancelPendingNewThreadPrompt(ctx context.Context, chatID, topicID int64) (*DirectResponse, error) {
+	state, ok, _, err := s.pendingNewThreadState(ctx, chatID, topicID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return &DirectResponse{Text: "当前没有等待中的新会话。"}, nil
+	}
+	if err := s.store.DeleteState(ctx, newThreadStateKey(chatID, topicID)); err != nil {
+		return nil, err
+	}
+	switch state.Kind {
+	case pendingNewThreadKindChat:
+		return &DirectResponse{Text: "已取消创建新 Chat。"}, nil
+	default:
+		return &DirectResponse{Text: "已取消创建新会话。"}, nil
+	}
 }
 
 func (s *Service) codexChatsRoot() string {
@@ -692,10 +738,47 @@ func (s *Service) maybeConsumeNewThreadPrompt(ctx context.Context, chatID, topic
 	}
 	if expired {
 		_ = s.store.DeleteState(ctx, newThreadStateKey(chatID, topicID))
-		return &DirectResponse{Text: "New thread request expired. Use /projects and New thread again."}, true, nil
+		if state.Kind == pendingNewThreadKindChat {
+			return &DirectResponse{Text: "新 Chat 信息输入已超时，请重新发送 /newchat。"}, true, nil
+		}
+		if state.Kind == pendingNewThreadKindWithoutCWD {
+			return &DirectResponse{Text: "新会话信息输入已超时，请重新发送 /newthread。"}, true, nil
+		}
+		return &DirectResponse{Text: "新会话请求已超时，请返回 /projects 重新选择新建会话。"}, true, nil
+	}
+	if state.Stage == pendingNewThreadStageTitle {
+		title := compactThreadSelectionText(text)
+		if title == "" {
+			return &DirectResponse{Text: "标题不能为空，请重新输入。\n\n发送 /cancel 取消。"}, true, nil
+		}
+		if len([]rune(title)) > telegramThreadTitleMaxRunes {
+			return &DirectResponse{Text: fmt.Sprintf("标题最多 %d 个字符，请缩短后重新输入。\n\n发送 /cancel 取消。", telegramThreadTitleMaxRunes)}, true, nil
+		}
+		state.Title = title
+		state.Stage = pendingNewThreadStagePrompt
+		if err := s.savePendingNewThreadState(ctx, chatID, topicID, state); err != nil {
+			return nil, true, err
+		}
+		return &DirectResponse{Text: fmt.Sprintf("标题已记录：%s\n\n现在请输入首条 prompt。\n发送 /cancel 取消。", title)}, true, nil
 	}
 	_ = s.store.DeleteState(ctx, newThreadStateKey(chatID, topicID))
-	response, err := s.createThreadFromProjectPrompt(ctx, chatID, topicID, state, strings.TrimSpace(text))
+	prompt := strings.TrimSpace(text)
+	switch state.Kind {
+	case pendingNewThreadKindChat:
+		folderTitle := firstNonEmpty(state.Title, prompt)
+		cwd, directoryName, err := createCodexChatCWD(s.codexChatsRoot(), folderTitle, s.now())
+		if err != nil {
+			return &DirectResponse{Text: fmt.Sprintf("Could not create Codex Chat folder: %v", err)}, true, nil
+		}
+		state.ProjectName = chatsProjectName
+		state.DirectoryName = directoryName
+		state.CWD = cwd
+	case pendingNewThreadKindWithoutCWD:
+		state.ProjectName = ""
+		state.DirectoryName = ""
+		state.CWD = ""
+	}
+	response, err := s.createThreadFromProjectPrompt(ctx, chatID, topicID, state, prompt)
 	return response, true, err
 }
 
@@ -712,7 +795,7 @@ func (s *Service) pendingNewThreadState(ctx context.Context, chatID, topicID int
 		return pendingNewThreadState{}, true, true, nil
 	}
 	expiresAt, err := time.Parse(time.RFC3339Nano, state.ExpiresAt)
-	if err != nil || time.Now().UTC().After(expiresAt) {
+	if err != nil || s.currentTime().After(expiresAt) {
 		return state, true, true, nil
 	}
 	return state, true, false, nil
@@ -720,14 +803,14 @@ func (s *Service) pendingNewThreadState(ctx context.Context, chatID, topicID int
 
 func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, topicID int64, state pendingNewThreadState, prompt string) (*DirectResponse, error) {
 	if strings.TrimSpace(prompt) == "" {
-		return &DirectResponse{Text: "First prompt is empty. Use New thread again and send a non-empty prompt."}, nil
+		return &DirectResponse{Text: "首条 prompt 不能为空，请重新新建会话。"}, nil
 	}
 	s.mu.RLock()
 	live := s.live
 	connected := s.liveConnected
 	s.mu.RUnlock()
 	if !connected || live == nil {
-		return &DirectResponse{Text: "Live app-server session is not ready yet. Try /status or /repair."}, nil
+		return &DirectResponse{Text: "会话服务暂未就绪，请使用 /status 检查或使用 /repair 修复。"}, nil
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
@@ -742,7 +825,33 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 	}
 	thread := threadFromStartPayload(threadPayload, state)
 	if strings.TrimSpace(thread.ID) == "" {
-		return &DirectResponse{Text: "App Server could not create thread: response did not include thread id."}, nil
+		return &DirectResponse{Text: "创建会话失败：会话服务没有返回会话 ID。"}, nil
+	}
+	explicitTitle := compactThreadSelectionText(state.Title)
+	if explicitTitle != "" {
+		thread.Title = explicitTitle
+	} else if threadSelectionTitleIsPlaceholder(thread.Title, thread.ID) {
+		if promptTitle := newThreadPromptTitle(prompt); promptTitle != "" {
+			thread.Title = promptTitle
+		}
+	}
+	s.markLiveThreadOwned(thread.ID)
+	_ = s.setTelegramWriterReleased(ctx, thread.ID, false)
+	if explicitTitle != "" {
+		if err := s.store.SetState(ctx, manualThreadTitleStateKey(thread.ID), explicitTitle); err != nil {
+			return nil, err
+		}
+		if admin, ok := live.(control.ThreadAdmin); ok {
+			started = time.Now()
+			_, titleErr := admin.ThreadSetName(requestCtx, thread.ID, explicitTitle)
+			s.logAppServerCall("ThreadSetName", started, titleErr, live, lifecycleFields{
+				"operation": "set_new_thread_title",
+				"thread_id": thread.ID,
+			})
+			if titleErr != nil {
+				s.logLifecycle("new_thread_title_sync_failed", lifecycleFields{"thread_id": thread.ID, "error": titleErr})
+			}
+		}
 	}
 	if err := s.store.UpsertThread(ctx, thread); err != nil {
 		return nil, err
@@ -782,10 +891,10 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 		})
 	}
 	s.ensureNewChatThreadFallback(ctx, thread.ID, state)
-	if err := s.store.SetBinding(ctx, chatID, topicID, thread.ID, model.BindingModeBound); err != nil {
+	target := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}
+	if err := s.activateForegroundThread(ctx, target, thread.ID, true); err != nil {
 		return nil, err
 	}
-	target := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}
 	s.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
 	if strings.TrimSpace(turnID) != "" {
 		s.startTelegramOriginHotPoll(ctx, thread.ID, turnID)
@@ -844,6 +953,18 @@ func threadFromStartPayload(payload map[string]any, state pendingNewThreadState)
 		thread.Raw = json.RawMessage(storage.MustJSON(payload))
 	}
 	return thread
+}
+
+func newThreadPromptTitle(prompt string) string {
+	title := compactThreadSelectionText(prompt)
+	if title == "" {
+		return ""
+	}
+	runes := []rune(title)
+	if len(runes) > telegramThreadTitleMaxRunes {
+		return strings.TrimSpace(string(runes[:telegramThreadTitleMaxRunes-3])) + "..."
+	}
+	return title
 }
 
 func newThreadStateKey(chatID, topicID int64) string {

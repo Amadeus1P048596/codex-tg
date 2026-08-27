@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -60,8 +61,10 @@ func TestServiceInstallNonInteractiveWritesConfigAndLaunchAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat config failed: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("config mode = %o, want 0600", got)
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("config mode = %o, want 0600", got)
+		}
 	}
 	plistPath := filepath.Join(home, "service", serviceLabel+".plist")
 	plist, err := os.ReadFile(plistPath)

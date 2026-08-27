@@ -2,34 +2,121 @@
 
 ## Run Chronology
 
-Foreign GUI/CLI runs render as:
+Each Codex turn normally owns one Telegram activity card. For the first four
+seconds the bot sends only `typing`; if the turn is still active, it creates:
 
 ```text
-New run
-[User]
-[commentary]
-[Tool]
-[Output]
-[Final]
+❤️ Codex-TG Activity Card
+Codex · 处理中
+正在处理请求 · 38s
+
+进度
+✓ 搜索 output 相关实现
+✓ 查看 internal/daemon/output.go
+● ✏️ 修改输出裁剪逻辑
+
+9 次操作 · T:01a03706
 ```
 
-`New run`, `[commentary]`, `[Tool]`, and `[Output]` are deleted best-effort when the final card is rendered. `[User]` remains as a historical marker.
+The leading emoji is a stable conversation identity, not a status signal. The
+thread/task title is the primary first row; `Codex · State · duration` is the
+secondary status row. If App Server has not supplied a title yet, the renderer
+temporarily falls back to the compact single-row status header. The primary UI
+uses the Chinese states `处理中`, `需要输入`, `已完成`, `失败`, and `已取消`. Tool,
+output, and lifecycle events are de-duplicated and aggregated into at most three
+activities. Non-terminal edits are limited to one every four seconds. Fast
+reads, searches, and status checks usually affect only the operation count.
 
-`New run` identifies the source of the run. `[User]` carries the request text. Neither card shows run status.
+Raw `[Tool]`, `[Output]`, `Last completed tool`, and empty-output messages are
+not part of the normal chronology. Details and export actions retain the raw
+evidence for diagnostics.
 
 ## Final Card
 
-The active commentary card owns run status while the run is active. When the final answer is available, the bridge sends a new `[Final]` card and moves the panel route to that message. `[Final]` shows final-answer text/status only; completed commentary and tool/output history stay in Details. Tool-only turns with no commentary appear in Details as `Tool activity`. Details pagination edits the Final card instead of sending more messages, and Details/Back buttons stay bound to the completed run card that created them.
+The Working card is edited in place to its terminal state. It is not deleted and
+replaced with a new Final message. Fast turns that finish before the four-second
+grace period produce only one terminal card.
+
+Short final answers appear directly on that card and add one compact audible
+completion notice because Telegram does not notify for message edits. Long answers first complete
+the original card with a compact summary, then continue in one or more
+`Codex · 结果` messages. Completed commentary and tool/output history remain
+available through Details, Tools file, and full-log actions. Details/Back stay
+bound to the completed card and turn that created them.
 
 ## Notifications
 
-Most bot messages are sent silently to avoid notification spam. Normal Telegram notifications are reserved for `New run`, `[Plan]`, and `[Final]`. `New run` notifications are enabled by default and can be disabled with `CTR_GO_NOTIFY_NEW_RUN=off`; the card remains visible either way. `[Plan]` question cards and `[Final]` cards always use normal notifications.
+Typing, Working creation, repeated activity edits, exports, and direct menu
+responses are silent. A short foreground terminal edit sends one de-duplicated
+compact audible notice; a fast terminal card or separately sent long result is
+already audible and does not add that notice. Needs-input retains its product
+notification policy. Tool event bursts never create individual notifications.
+
+## Session Home, Inbox, And Thread Picker
+
+`/start` and `/home` open the same compact session home. It shows the foreground
+session title, current state and elapsed time, plus a durable count of background
+sessions needing attention. Its buttons open the current card, the runtime
+session picker, a Chat/ordinary-session creation chooser, or `/inbox` in place.
+
+`/inbox` is SQLite-backed and survives daemon restarts. It retains one current
+Completed, Failed, Cancelled, or Needs-input item per background session. Items
+are title buttons; switching to one clears it from the inbox.
+
+Each Telegram chat/topic has one foreground Codex session. Its Working card is
+the only live progress card shown. Progress from other sessions is completely
+suppressed; when a background session completes, fails, is cancelled, or needs
+input, Telegram sends one compact notice with a `切换至该会话` button.
+
+Switching removes the previous foreground Working card, makes the selected
+session the foreground and bound session, and shows its current card. This keeps
+concurrent work observable without making several progress cards jump around.
+
+`/threads` is an authoritative picker for the current Telegram App Server
+runtime. It shows one clickable title button per available session and no
+numbered `Open 1`, `Open 2`, or cached debug description rows. A placeholder
+App Server title falls back to the session's latest prompt preview. Cached
+Desktop sessions that are absent from the isolated Telegram runtime are not
+shown and cannot be opened as stale Completed cards.
+
+`/current` shows the foreground session marker, title, Chinese status, and short
+task id. `/title <new title>` renames that current App Server thread, records the
+title as user-owned, and edits its existing Activity Card in place. Runtime
+refreshes cannot overwrite a user-owned title. Interactive `/newchat` and
+`/newthread` flows collect and write through an explicit title before asking for
+the first prompt. Legacy one-line creation uses its prompt as a temporary title
+whenever App Server still returns a UUID or generic placeholder; a later real
+App Server title replaces only that automatic fallback. Creating or binding a
+session also makes it the foreground session.
+
+`/archive` targets only the current foreground session. Running and input-blocked
+sessions are rejected before confirmation. An idle session shows inline
+`确认归档` / `取消`; success lands on `切换其他会话` and `新建会话` instead of a
+dead end. `/cancel` remains the immediate
+cancel action for pending `/newchat` and `/newthread` creation and has no archive
+confirmation behavior. `/unarchive` lists the current Telegram runtime's real
+archived threads ten per page; each title is a restore button, with inline
+previous/next navigation. Restore success offers both `切换至该会话` and
+`继续查看归档`.
+
+## Photo Input
+
+A pure Telegram photo or photo with a caption is accepted on a routed or
+reply-targeted thread. The bot chooses the largest Telegram photo variant,
+downloads up to 20 MiB into a private temporary directory, and starts or steers
+the turn with the caption plus an App Server `localImage` input. With no caption,
+it supplies a short default image-analysis prompt. Temporary input files are
+removed after the App Server accepts the request, and no separate media-receipt
+card is created.
+
+Media groups and photo-first `/newchat` or `/newthread` creation are not covered
+by this implementation slice.
 
 ## Plan Mode
 
 Telegram can start a Codex Plan Mode turn with `/plan <thread> <text>`, `/plan_mode <thread> <text>`, or `/reply --plan <thread> <text>`. These commands use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not treated as Plan Mode.
 
-If a thread remains in Plan Mode after a completed turn, the Plan Final Card shows `Turn off Plan`. Pressing it sets a one-shot local reset for that thread; the next ordinary `turn/start` is sent with `collaborationMode.mode = default` and then the reset is cleared. `/stop <thread>` sets the same one-shot reset even when the thread is already idle.
+If a thread remains in Plan Mode after a completed turn, the Plan Final Card shows `退出 Plan`. Pressing it sets a one-shot local reset for that thread; the next ordinary `turn/start` is sent with `collaborationMode.mode = default` and then the reset is cleared. `/stop <thread>` sets the same one-shot reset even when the thread is already idle.
 
 When Codex asks for input, the bridge renders a separate routeable `[Plan]` prompt-card. Replying to that card answers the same run. Structured buttons appear only when Codex provides choices.
 
@@ -50,11 +137,15 @@ The main `/projects` view shows recent project workspaces and the latest Chat
 previews; `Open Chats` opens the full paginated Chat list. Selecting a Chat
 opens and binds that single thread.
 
-New Chat starts use `/newchat <prompt>`. The bridge creates a dated Chat folder
-under the configured Chats root, passes that cwd to App Server `thread/start`,
-and starts the first turn in that cwd. `/newthread <prompt>` is the separate
-escape hatch for starting without project selection or Chat folder creation;
-App Server may still report the daemon default cwd for that thread.
+New Chat starts can use `/newchat` followed by a title and then a separate first
+prompt. The bot keeps the pending stage and title for the current chat/topic for
+15 minutes and offers `/cancel`. The bridge creates a dated Chat folder from the
+title under the configured Chats root, passes that cwd to App Server
+`thread/start`, writes the title through, and starts the first turn using only
+the prompt. `/newthread` uses the same title-then-prompt interaction without
+project selection or Chat folder creation. The one-line `/newchat <prompt>` and
+`/newthread <prompt>` forms remain supported. App Server may still report the
+daemon default cwd for a `/newthread` thread.
 
 The Telegram bot does not accept arbitrary filesystem paths for this flow.
 Creating or editing project work directories is a separate future feature.
@@ -64,6 +155,27 @@ Creating or editing project work directories is a separate future feature.
 `/settings`, `/model`, and `/effort` expose Telegram button menus for model selection and reasoning effort used by Telegram-started collaboration-mode turns. The selections are stored in SQLite daemon state and are not configured through public env vars.
 
 After a model or reasoning-effort selection, the menu message is edited into a compact settings summary without inline choice buttons. Use `/settings`, `/model`, or `/effort` to reopen the menus.
+
+## Sharing Threads With Codex Desktop
+
+`/show` and observer-only tracking are read-only. `/bind` and `由 TG 接管` are
+explicit ownership actions: Telegram resumes the thread and retains its writer.
+Repair and daemon restart restore that ownership automatically.
+
+If another Codex client owns the writer, Telegram reports the conflict and keeps
+the binding so it can retry acquisition after that client exits. It does not
+queue the user's message or create a parallel turn.
+
+While Telegram owns the writer, summary and Final cards show `释放 TG 控制`
+instead of `由 TG 接管`. After a Telegram-started turn is idle, use that button or
+`/release` to close Telegram's live writer session. Release applies to all idle
+threads owned by that live session and persists a marker so background refresh
+or restart does not immediately reacquire them. It refuses to run if any owned
+thread is still active, waiting for approval/input, or cannot be verified.
+The daemon invokes the same guarded, session-wide release automatically after
+five minutes without an allowed Telegram message or button action. New Telegram
+activity resets the timer; an active or pending thread delays release until a
+later safety check succeeds.
 
 ## Exports
 

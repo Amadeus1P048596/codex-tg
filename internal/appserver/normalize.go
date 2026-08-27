@@ -934,6 +934,7 @@ func collectDetailItemsFromItems(items []any, turnStatus string) []model.DetailI
 			out = append(out, model.DetailItem{
 				ID:              itemID,
 				Kind:            model.DetailItemTool,
+				ToolKind:        itemType,
 				Label:           label,
 				Status:          status,
 				FP:              toolFP,
@@ -962,11 +963,12 @@ func liveToolDetailItems(snapshot ThreadReadSnapshot) []model.DetailItem {
 		return nil
 	}
 	items := []model.DetailItem{{
-		ID:     snapshot.LatestToolID,
-		Kind:   model.DetailItemTool,
-		Label:  snapshot.LatestToolLabel,
-		Status: snapshot.LatestToolStatus,
-		FP:     snapshot.LatestToolFP,
+		ID:       snapshot.LatestToolID,
+		Kind:     model.DetailItemTool,
+		ToolKind: snapshot.LatestToolKind,
+		Label:    snapshot.LatestToolLabel,
+		Status:   snapshot.LatestToolStatus,
+		FP:       snapshot.LatestToolFP,
 	}}
 	if output := strings.TrimSpace(snapshot.LatestToolOutput); output != "" {
 		items = append(items, model.DetailItem{

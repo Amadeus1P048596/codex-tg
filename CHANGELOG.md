@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v0.5.0-amadeus.1 - 2026-08-27
+
+- Reworked Telegram turn rendering around one throttled activity card with a
+  typing grace period, aggregated user-facing operations, in-place terminal
+  state, compact completion notifications, and HTML rendering support.
+- Added one foreground session per Telegram chat/topic, a durable session home
+  and inbox, authoritative runtime thread navigation, and background-session
+  switch notices.
+- Added interactive title-then-prompt creation, `/current`, user-owned `/title`,
+  guarded `/archive`, paginated `/unarchive`, and `/cancel` for pending creation.
+- Added explicit Telegram writer acquisition/release, guarded session-wide
+  handoff, and idle automatic release without queuing input or starting parallel
+  turns during ownership conflicts.
+- Added routed Telegram photo input through App Server `localImage` and an
+  optional isolated `CTR_GO_CODEX_HOME` for spawned App Server processes.
+- Added Windows thread-archive path compatibility plus ADRs, feature briefs,
+  regression coverage, and validation notes for the new behavior.
+- Published as a community fork of `mideco-tech/codex-tg` under Apache-2.0;
+  upstream authorship, `LICENSE`, and `NOTICE` are preserved and acknowledged in
+  `FORK_NOTES.md`.
+
 ## v0.5.0 - 2026-05-18
 
 - Repositioned the project from a Telegram-first remote UI to a local Codex Control Plane with Telegram as the first production adapter.

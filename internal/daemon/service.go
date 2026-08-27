@@ -32,14 +32,19 @@ type Sender interface {
 	SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error)
 }
 
+type chatActionSender interface {
+	SendChatAction(ctx context.Context, chatID, topicID int64, action string) error
+}
+
 type DirectResponse struct {
-	Text         string
-	CallbackText string
-	Buttons      [][]model.ButtonSpec
-	ThreadID     string
-	TurnID       string
-	ItemID       string
-	EventID      string
+	Text           string
+	CallbackText   string
+	Buttons        [][]model.ButtonSpec
+	ThreadID       string
+	TurnID         string
+	ItemID         string
+	EventID        string
+	WriterReleased bool
 }
 
 func silentSendOptions() model.SendOptions {
@@ -64,31 +69,36 @@ type Service struct {
 	liveFactory func() Session
 	pollFactory func() Session
 
-	sessionMu      sync.Mutex
-	mu             sync.RWMutex
-	live           Session
-	poll           Session
-	liveEvents     <-chan appserver.Event
-	liveGeneration uint64
-	pollGeneration uint64
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	panelMu        sync.Mutex
-	sender         Sender
-	logger         *log.Logger
-	diagnosticMu   sync.Mutex
-	diagnosticWin  time.Time
-	diagnosticN    int
-	diagnosticBy   map[string]int
-	diagnosticLast map[string]time.Time
-	now            func() time.Time
-	started        bool
-	startedAt      time.Time
-	ready          bool
-	phase          string
-	lastError      string
-	liveConnected  bool
-	pollConnected  bool
+	sessionMu                sync.Mutex
+	mu                       sync.RWMutex
+	live                     Session
+	poll                     Session
+	liveEvents               <-chan appserver.Event
+	liveGeneration           uint64
+	pollGeneration           uint64
+	liveOwnedThreads         map[string]struct{}
+	liveReleasing            bool
+	writerLastActivity       time.Time
+	writerAutoReleaseAttempt time.Time
+	cancel                   context.CancelFunc
+	wg                       sync.WaitGroup
+	panelMu                  sync.Mutex
+	sender                   Sender
+	logger                   *log.Logger
+	diagnosticMu             sync.Mutex
+	diagnosticWin            time.Time
+	diagnosticN              int
+	diagnosticBy             map[string]int
+	diagnosticLast           map[string]time.Time
+	panelEditedAt            map[int64]time.Time
+	now                      func() time.Time
+	started                  bool
+	startedAt                time.Time
+	ready                    bool
+	phase                    string
+	lastError                string
+	liveConnected            bool
+	pollConnected            bool
 }
 
 const (
@@ -99,6 +109,9 @@ const (
 	codexReasoningStateKey    = "codex.reasoning_effort"
 	telegramOriginHotPollMax  = 75 * time.Second
 	telegramOriginHotPollTick = 3 * time.Second
+	telegramWriterIdleTimeout = 5 * time.Minute
+	telegramWriterIdleCheck   = 15 * time.Second
+	telegramWriterIdleRetry   = 30 * time.Second
 )
 
 var (
@@ -115,19 +128,27 @@ func New(cfg config.Config) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{
-		cfg:            cfg,
-		store:          store,
-		logger:         discardDiagnosticLogger(),
-		diagnosticBy:   map[string]int{},
-		diagnosticLast: map[string]time.Time{},
-		now:            time.Now,
-		phase:          "created",
+		cfg:              cfg,
+		store:            store,
+		logger:           discardDiagnosticLogger(),
+		diagnosticBy:     map[string]int{},
+		diagnosticLast:   map[string]time.Time{},
+		panelEditedAt:    map[int64]time.Time{},
+		now:              time.Now,
+		phase:            "created",
+		liveOwnedThreads: map[string]struct{}{},
 	}
 	service.liveFactory = func() Session {
-		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout)
+		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout, appserver.ClientOptions{
+			FullAccess: cfg.FullAccess,
+			CodexHome:  cfg.CodexHome,
+		})
 	}
 	service.pollFactory = func() Session {
-		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout)
+		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout, appserver.ClientOptions{
+			FullAccess: cfg.FullAccess,
+			CodexHome:  cfg.CodexHome,
+		})
 	}
 	service.live = service.liveFactory()
 	service.poll = service.pollFactory()
@@ -202,6 +223,7 @@ func (s *Service) Start(ctx context.Context) error {
 	s.spawn(runCtx, s.pollLoop)
 	s.spawn(runCtx, s.deliveryLoop)
 	s.spawn(runCtx, s.controlLoop)
+	s.spawn(runCtx, s.telegramWriterIdleLoop)
 	return nil
 }
 
@@ -285,6 +307,7 @@ func (s *Service) HandleMessage(ctx context.Context, chatID, topicID, userID int
 	if !s.IsAllowed(userID, chatID) {
 		return nil, nil
 	}
+	s.touchTelegramWriterActivity()
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return &DirectResponse{Text: "Plain text messages only right now. Send text, or use /context for routing help."}, nil
@@ -295,22 +318,81 @@ func (s *Service) HandleMessage(ctx context.Context, chatID, topicID, userID int
 	return s.handlePlainText(ctx, chatID, topicID, text, replyToMessageID)
 }
 
+func (s *Service) HandleMessageWithLocalImages(ctx context.Context, chatID, topicID, userID int64, text string, localImagePaths []string, replyToMessageID int64) (*DirectResponse, error) {
+	if len(localImagePaths) == 0 {
+		return s.HandleMessage(ctx, chatID, topicID, userID, text, replyToMessageID)
+	}
+	if !s.IsAllowed(userID, chatID) {
+		return nil, nil
+	}
+	s.touchTelegramWriterActivity()
+	text = strings.TrimSpace(text)
+	if text == "" {
+		text = "请查看并分析这张图片。"
+	}
+	inputs := []control.UserInput{{Type: "text", Text: text}}
+	for _, path := range localImagePaths {
+		if path = strings.TrimSpace(path); path != "" {
+			inputs = append(inputs, control.UserInput{Type: "localImage", Path: path})
+		}
+	}
+	if len(inputs) == 1 {
+		return s.HandleMessage(ctx, chatID, topicID, userID, text, replyToMessageID)
+	}
+	return s.handlePlainInputs(ctx, chatID, topicID, text, inputs, replyToMessageID)
+}
+
 func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID, userID int64, token string) (*DirectResponse, error) {
 	if !s.IsAllowed(userID, chatID) {
 		return nil, nil
 	}
+	s.touchTelegramWriterActivity()
 	route, err := s.store.GetCallbackRoute(ctx, token)
 	if err != nil {
 		return nil, err
 	}
 	if route == nil || route.Status != model.CallbackStatusActive {
-		return &DirectResponse{Text: "This button is stale. Use /show <thread> or /repair."}, nil
+		return &DirectResponse{Text: "这个按钮已失效，请使用 /show <会话> 或 /repair。"}, nil
 	}
 	var payload map[string]any
 	if route.PayloadJSON != "" {
 		_ = json.Unmarshal([]byte(route.PayloadJSON), &payload)
 	}
 	switch route.Action {
+	case "home_overview":
+		response, err := s.homeOverview(ctx, chatID, topicID)
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "已返回首页。")
+	case "home_threads":
+		response, err := s.threadsOverview(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "请选择会话。")
+	case "home_inbox":
+		response, err := s.inboxOverview(ctx, chatID, topicID)
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "已打开待处理。")
+	case "home_show_current":
+		return s.showCurrentFromHome(ctx, chatID, topicID, messageID)
+	case "home_new_menu":
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, s.newSessionMenu(ctx), "请选择会话类型。")
+	case "home_new_chat":
+		response, err := s.newChatCommand(ctx, chatID, topicID, "")
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "请输入首条消息。")
+	case "home_new_thread":
+		response, err := s.newThreadWithoutCWDCommand(ctx, chatID, topicID, "")
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "请输入首条消息。")
 	case "details_open", "details_prev", "details_next", "details_back", "details_tool_toggle":
 		return s.handleDetailsCallback(ctx, chatID, topicID, messageID, route, payload)
 	case "details_tools_file":
@@ -345,6 +427,16 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.bindLatestProjectThread(ctx, chatID, topicID, payload)
 	case "show_thread":
 		return s.showThread(ctx, chatID, topicID, route.ThreadID, true)
+	case "switch_thread":
+		return s.switchThread(ctx, chatID, topicID, messageID, route.ThreadID)
+	case "archive_confirm":
+		return s.confirmArchiveThread(ctx, chatID, topicID, messageID, route)
+	case "archive_cancel":
+		return s.cancelArchiveThread(ctx, chatID, topicID, messageID, route)
+	case "unarchive_page":
+		return s.handleArchivedThreadsPage(ctx, chatID, topicID, messageID, payload)
+	case "unarchive_thread":
+		return s.unarchiveThread(ctx, chatID, topicID, messageID, route)
 	case "show_context":
 		text, err := s.contextCard(ctx, chatID, topicID)
 		if err != nil {
@@ -354,11 +446,20 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 	case "get_thread_id":
 		return threadIDResponse(route.ThreadID, route.TurnID), nil
 	case "bind_here":
-		if err := s.store.SetBinding(ctx, chatID, topicID, route.ThreadID, model.BindingModeBound); err != nil {
-			return nil, err
+		response, err := s.bindThreadForTelegram(ctx, chatID, topicID, route.ThreadID)
+		if err == nil && response != nil && s.ownsLiveThread(route.ThreadID) {
+			target := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}
+			s.syncThreadPanelToTarget(ctx, target, route.ThreadID, false, model.PanelSourceExplicit)
 		}
-		s.kickBootstrap()
-		return &DirectResponse{CallbackText: fmt.Sprintf("Bound this chat to %s.", route.ThreadID)}, nil
+		return response, err
+	case "release_writer":
+		response, err := s.releaseTelegramWriters(ctx)
+		if err == nil && response != nil && response.WriterReleased {
+			response.ThreadID = route.ThreadID
+			target := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}
+			s.syncThreadPanelToTarget(ctx, target, route.ThreadID, false, model.PanelSourceExplicit)
+		}
+		return response, err
 	case "observe_all":
 		if err := s.store.SetGlobalObserverTarget(ctx, chatID, topicID, true); err != nil {
 			return nil, err
@@ -702,7 +803,7 @@ func (s *Service) applyLiveToolSnapshot(ctx context.Context, threadID string, li
 	if current.Thread.ID == "" {
 		current.Thread = *thread
 	} else {
-		current.Thread = mergeThreadMetadata(current.Thread, *thread)
+		current.Thread = s.mergeRuntimeThreadMetadata(ctx, current.Thread, *thread)
 	}
 	turnID := strings.TrimSpace(liveTool.LatestTurnID)
 	if turnID == "" {
@@ -1004,6 +1105,47 @@ func (s *Service) controlLoop(ctx context.Context) {
 	}
 }
 
+func (s *Service) telegramWriterIdleLoop(ctx context.Context) {
+	ticker := time.NewTicker(telegramWriterIdleCheck)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.autoReleaseTelegramWritersIfIdle(ctx)
+		}
+	}
+}
+
+func (s *Service) autoReleaseTelegramWritersIfIdle(ctx context.Context) {
+	now := s.currentTime()
+	s.mu.Lock()
+	idleSince := s.writerLastActivity
+	lastAttempt := s.writerAutoReleaseAttempt
+	eligible := s.liveConnected && !s.liveReleasing && len(s.liveOwnedThreads) > 0 && !idleSince.IsZero()
+	if !eligible || now.Before(idleSince.Add(telegramWriterIdleTimeout)) ||
+		(!lastAttempt.IsZero() && now.Before(lastAttempt.Add(telegramWriterIdleRetry))) {
+		s.mu.Unlock()
+		return
+	}
+	s.writerAutoReleaseAttempt = now
+	s.mu.Unlock()
+
+	response, err := s.releaseTelegramWritersIfStillIdle(ctx, idleSince)
+	if err != nil {
+		s.logLifecycle("telegram_writer_auto_release_failed", lifecycleFields{"error": err})
+		return
+	}
+	if response == nil || !response.WriterReleased {
+		return
+	}
+	_ = s.store.SetState(ctx, "writer.telegram.auto_released_at", now.Format(time.RFC3339Nano))
+	s.logLifecycle("telegram_writer_auto_release_completed", lifecycleFields{
+		"idle_seconds": int64(now.Sub(idleSince).Seconds()),
+	})
+}
+
 func (s *Service) reconcileSessions(ctx context.Context) {
 	s.ensureSessionLifecycle(ctx)
 }
@@ -1018,6 +1160,10 @@ func (s *Service) repairSessions(ctx context.Context, reason string) {
 	s.live = s.liveFactory()
 	s.poll = s.pollFactory()
 	s.liveEvents = nil
+	s.liveOwnedThreads = map[string]struct{}{}
+	s.liveReleasing = false
+	s.writerLastActivity = time.Time{}
+	s.writerAutoReleaseAttempt = time.Time{}
 	s.liveGeneration++
 	liveGeneration := s.liveGeneration
 	s.pollGeneration++
@@ -1092,6 +1238,9 @@ func (s *Service) syncThreads(ctx context.Context, limit int) {
 			return
 		}
 		for _, thread := range threads {
+			if existing, getErr := s.store.GetThread(ctx, thread.ID); getErr == nil && existing != nil {
+				thread = s.mergeRuntimeThreadMetadata(ctx, thread, *existing)
+			}
 			_ = s.store.UpsertThread(ctx, thread)
 		}
 		remaining -= len(threads)
@@ -1104,6 +1253,8 @@ func (s *Service) syncThreads(ctx context.Context, limit int) {
 }
 
 func (s *Service) attachTracked(ctx context.Context) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
 	s.mu.RLock()
 	live := s.live
 	connected := s.liveConnected
@@ -1111,22 +1262,27 @@ func (s *Service) attachTracked(ctx context.Context) {
 	if !connected || live == nil {
 		return
 	}
-	seen := map[string]struct{}{}
-	for _, threadID := range append(s.boundThreadIDs(ctx), s.currentPanelThreadIDs(ctx)...) {
-		if _, ok := seen[threadID]; ok {
+	for _, threadID := range s.boundThreadIDs(ctx) {
+		if s.telegramWriterReleased(ctx, threadID) || s.ownsLiveThread(threadID) {
 			continue
 		}
-		seen[threadID] = struct{}{}
 		thread, err := s.store.GetThread(ctx, threadID)
 		if err != nil || thread == nil {
 			continue
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		started := time.Now()
 		_, err = live.ThreadResume(requestCtx, thread.ID, thread.CWD)
 		cancel()
+		s.logAppServerCall("ThreadResume", started, err, live, lifecycleFields{
+			"operation": "attach_bound",
+			"thread_id": thread.ID,
+		})
 		if err != nil {
 			s.setError(ctx, fmt.Errorf("thread_resume(bound): %w", err))
+			continue
 		}
+		s.markLiveThreadOwned(thread.ID)
 	}
 }
 
@@ -1187,7 +1343,7 @@ func (s *Service) pollTracked(ctx context.Context) {
 		}
 		current := appserver.SnapshotFromThreadRead(payload)
 		current.Thread.Raw, _ = json.Marshal(payload)
-		current.Thread = mergeThreadMetadata(current.Thread, thread)
+		current.Thread = s.mergeRuntimeThreadMetadata(ctx, current.Thread, thread)
 		latestSnapshot := snapshot
 		if stored, err := s.store.GetSnapshot(ctx, thread.ID); err == nil && stored != nil {
 			latestSnapshot = stored
@@ -1266,10 +1422,10 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		rest = strings.TrimSpace(parts[1])
 	}
 	switch command {
-	case "/start":
-		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
+	case "/start", "/home":
+		return s.homeOverview(ctx, chatID, topicID)
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/newthread <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "常用命令：\n/home 会话首页\n/current 当前会话\n/threads 切换会话\n/inbox 待处理\n/newchat 新建 Chat\n/newthread 新建普通会话\n/cancel 取消待输入的新建请求\n/title <标题> 修改当前会话标题\n/archive 归档当前会话\n/unarchive 恢复已归档会话\n/settings 模型设置\n/status 运行状态\n\n更多控制：\n/projects\n/show <会话>\n/bind <会话>\n/reply [--plan] <会话> <内容>\n/plan <内容>\n/context\n/observe all|off\n/release\n/repair\n/stop [会话]"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1282,6 +1438,10 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		return &DirectResponse{Text: text}, nil
+	case "/current":
+		return s.currentThreadOverview(ctx, chatID, topicID)
+	case "/inbox":
+		return s.inboxOverview(ctx, chatID, topicID)
 	case "/observe":
 		switch strings.ToLower(rest) {
 		case "all", "on":
@@ -1326,6 +1486,14 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		return s.newChatCommand(ctx, chatID, topicID, rest)
 	case "/newthread":
 		return s.newThreadWithoutCWDCommand(ctx, chatID, topicID, rest)
+	case "/cancel":
+		return s.cancelPendingNewThreadPrompt(ctx, chatID, topicID)
+	case "/title":
+		return s.renameCurrentThread(ctx, chatID, topicID, rest)
+	case "/archive":
+		return s.archiveCurrentThreadPrompt(ctx, chatID, topicID)
+	case "/unarchive":
+		return s.archivedThreadsOverview(ctx)
 	case "/show":
 		decision, err := s.resolveRoute(ctx, chatID, topicID, rest, replyToMessageID)
 		if err != nil {
@@ -1343,11 +1511,11 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		if decision.ThreadID == "" {
 			return &DirectResponse{Text: "Usage: /bind <thread> or reply to a thread message."}, nil
 		}
-		if err := s.store.SetBinding(ctx, chatID, topicID, decision.ThreadID, model.BindingModeBound); err != nil {
-			return nil, err
+		response, err := s.bindThreadForTelegram(ctx, chatID, topicID, decision.ThreadID)
+		if response != nil && strings.TrimSpace(response.Text) == "" {
+			response.Text = response.CallbackText
 		}
-		s.kickBootstrap()
-		return &DirectResponse{Text: fmt.Sprintf("Bound this chat to %s.", decision.ThreadID)}, nil
+		return response, err
 	case "/reply":
 		decision, text, collaborationMode, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, "", true, false)
 		if err != nil {
@@ -1383,6 +1551,8 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		return &DirectResponse{Text: "Repair requested. App-server sessions will be recreated in the background."}, nil
+	case "/release":
+		return s.releaseTelegramWriters(ctx)
 	case "/stop":
 		return s.stopThread(ctx, chatID, topicID, rest, replyToMessageID)
 	case "/approve":
@@ -1404,6 +1574,10 @@ func (s *Service) handlePlainText(ctx context.Context, chatID, topicID int64, te
 	if response, consumed, err := s.maybeConsumeNewThreadPrompt(ctx, chatID, topicID, text); consumed {
 		return response, err
 	}
+	return s.handlePlainInputs(ctx, chatID, topicID, text, []control.UserInput{{Type: "text", Text: text}}, replyToMessageID)
+}
+
+func (s *Service) handlePlainInputs(ctx context.Context, chatID, topicID int64, text string, inputs []control.UserInput, replyToMessageID int64) (*DirectResponse, error) {
 	decision, err := s.resolveRoute(ctx, chatID, topicID, "", replyToMessageID)
 	if err != nil {
 		return nil, err
@@ -1413,9 +1587,12 @@ func (s *Service) handlePlainText(ctx context.Context, chatID, topicID int64, te
 	}
 	s.logTelegramInbound("plain_text", chatID, topicID, replyToMessageID, decision, text, "")
 	if strings.TrimSpace(decision.RequestID) != "" {
+		if userInputsHaveLocalImage(inputs) {
+			return &DirectResponse{Text: "当前正在等待结构化输入，请先回答问题，再单独发送图片。"}, nil
+		}
 		return s.respondUserInputRequest(ctx, decision.RequestID, text)
 	}
-	return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, "")
+	return s.sendInputToThreadTurnInputs(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, "", inputs)
 }
 
 func (s *Service) codexSettingsOverview(ctx context.Context) (*DirectResponse, error) {
@@ -1430,8 +1607,8 @@ func (s *Service) codexSettingsOverview(ctx context.Context) (*DirectResponse, e
 	}
 	buttons := [][]model.ButtonSpec{
 		{
-			s.callbackButton(ctx, "Model", "settings_model_menu", "settings", "", "", nil),
-			s.callbackButton(ctx, "Reasoning", "settings_reasoning_menu", "settings", "", "", nil),
+			s.callbackButton(ctx, "模型", "settings_model_menu", "settings", "", "", nil),
+			s.callbackButton(ctx, "推理强度", "settings_reasoning_menu", "settings", "", "", nil),
 		},
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
@@ -1460,8 +1637,8 @@ func (s *Service) codexModelMenu(ctx context.Context) (*DirectResponse, error) {
 		})
 	}
 	buttons = append(buttons, []model.ButtonSpec{
-		s.callbackButton(ctx, "Reasoning", "settings_reasoning_menu", "settings", "", "", nil),
-		s.callbackButton(ctx, "Settings", "settings_overview", "settings", "", "", nil),
+		s.callbackButton(ctx, "推理强度", "settings_reasoning_menu", "settings", "", "", nil),
+		s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
 	})
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
 }
@@ -1491,8 +1668,8 @@ func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, erro
 		buttons = append(buttons, row)
 	}
 	buttons = append(buttons, []model.ButtonSpec{
-		s.callbackButton(ctx, "Model", "settings_model_menu", "settings", "", "", nil),
-		s.callbackButton(ctx, "Settings", "settings_overview", "settings", "", "", nil),
+		s.callbackButton(ctx, "模型", "settings_model_menu", "settings", "", "", nil),
+		s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
 	})
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
 }
@@ -1640,10 +1817,11 @@ func selectedButtonLabel(label string, selected bool) string {
 func shortButtonLabel(label string) string {
 	label = strings.TrimSpace(label)
 	const limit = 60
-	if len(label) <= limit {
+	runes := []rune(label)
+	if len(runes) <= limit {
 		return label
 	}
-	return strings.TrimSpace(label[:limit-3]) + "..."
+	return strings.TrimSpace(string(runes[:limit-3])) + "..."
 }
 
 func containsString(values []string, needle string) bool {
@@ -1744,6 +1922,10 @@ func (s *Service) sendInputToThread(ctx context.Context, chatID, topicID int64, 
 }
 
 func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int64, threadID, routeTurnID, text, collaborationMode string) (*DirectResponse, error) {
+	return s.sendInputToThreadTurnInputs(ctx, chatID, topicID, threadID, routeTurnID, text, collaborationMode, []control.UserInput{{Type: "text", Text: text}})
+}
+
+func (s *Service) sendInputToThreadTurnInputs(ctx context.Context, chatID, topicID int64, threadID, routeTurnID, text, collaborationMode string, inputs []control.UserInput) (*DirectResponse, error) {
 	s.logLifecycle("telegram_turn_input_start", lifecycleFields{
 		"chat_key":           model.ChatKey(chatID, topicID),
 		"thread_id":          threadID,
@@ -1759,7 +1941,11 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	s.mu.RLock()
 	live := s.live
 	connected := s.liveConnected
+	releasing := s.liveReleasing
 	s.mu.RUnlock()
+	if releasing {
+		return &DirectResponse{Text: "Telegram is releasing its writer session. Retry this message in a few seconds."}, nil
+	}
 	if !connected || live == nil {
 		s.logLifecycle("telegram_turn_input_rejected", lifecycleFields{
 			"thread_id": threadID,
@@ -1775,8 +1961,20 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		"thread_id": threadID,
 	})
 	if err != nil {
+		if threadWriterConflict(err) {
+			s.logLifecycle("telegram_turn_input_rejected", lifecycleFields{
+				"thread_id": threadID,
+				"reason":    "writer_owned_by_another_client",
+			})
+			return &DirectResponse{
+				Text:     "Another Codex client currently owns this task's writer. Your Telegram message was not queued, and no parallel turn was started. Finish or release the task in that client, then retry here.",
+				ThreadID: threadID,
+			}, nil
+		}
 		return nil, err
 	}
+	s.markLiveThreadOwned(threadID)
+	_ = s.setTelegramWriterReleased(ctx, threadID, false)
 	if refreshed, refreshErr := s.refreshThreadForOperation(ctx, live, threadID, "refresh_thread_before_start"); refreshErr == nil && refreshed != nil {
 		thread = refreshed
 	} else if refreshErr != nil {
@@ -1791,7 +1989,7 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	steerState, _ := s.resolveArmedSteer(ctx, chatID, topicID)
 	if steerState != nil && steerState.ThreadID == threadID && strings.TrimSpace(steerState.TurnID) != "" {
 		started = time.Now()
-		result, steerErr = live.TurnSteer(requestCtx, threadID, steerState.TurnID, text)
+		result, steerErr = turnSteerWithInputs(requestCtx, live, threadID, steerState.TurnID, text, inputs)
 		s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
 			"thread_id": threadID,
 			"turn_id":   steerState.TurnID,
@@ -1803,7 +2001,7 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	}
 	if result == nil && strings.TrimSpace(routeTurnID) != "" {
 		started = time.Now()
-		result, steerErr = live.TurnSteer(requestCtx, threadID, routeTurnID, text)
+		result, steerErr = turnSteerWithInputs(requestCtx, live, threadID, routeTurnID, text, inputs)
 		s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
 			"thread_id": threadID,
 			"turn_id":   routeTurnID,
@@ -1812,7 +2010,7 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	}
 	if result == nil && strings.TrimSpace(routeTurnID) == "" && threadLooksActiveForInput(thread) && strings.TrimSpace(thread.ActiveTurnID) != "" {
 		started = time.Now()
-		result, steerErr = live.TurnSteer(requestCtx, threadID, thread.ActiveTurnID, text)
+		result, steerErr = turnSteerWithInputs(requestCtx, live, threadID, thread.ActiveTurnID, text, inputs)
 		s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
 			"thread_id": threadID,
 			"turn_id":   thread.ActiveTurnID,
@@ -1824,7 +2022,7 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 			thread.ActiveTurnID = foundTurnID
 			thread.Status = "active"
 			started = time.Now()
-			result, steerErr = live.TurnSteer(requestCtx, threadID, foundTurnID, text)
+			result, steerErr = turnSteerWithInputs(requestCtx, live, threadID, foundTurnID, text, inputs)
 			s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
 				"thread_id": threadID,
 				"turn_id":   foundTurnID,
@@ -1863,7 +2061,7 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		}
 		options := s.turnStartOptions(ctx, effectiveCollaborationMode, thread)
 		started = time.Now()
-		result, err = live.TurnStart(requestCtx, threadID, text, thread.CWD, options)
+		result, err = turnStartWithInputs(requestCtx, live, threadID, text, inputs, thread.CWD, options)
 		s.logAppServerCall("TurnStart", started, err, live, lifecycleFields{
 			"thread_id":           threadID,
 			"returned_turn_id":    appserverThreadTurnID(result),
@@ -1924,6 +2122,37 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		s.startTelegramOriginHotPoll(ctx, threadID, turn)
 	}
 	return &DirectResponse{ThreadID: threadID, TurnID: turn}, nil
+}
+
+func turnStartWithInputs(ctx context.Context, session Session, threadID, text string, inputs []control.UserInput, cwd string, options appserver.TurnStartOptions) (map[string]any, error) {
+	if userInputsHaveLocalImage(inputs) {
+		rich, ok := session.(control.RichTurns)
+		if !ok {
+			return nil, errors.New("the active Codex app-server session does not support local image input")
+		}
+		return rich.TurnStartInputs(ctx, threadID, inputs, cwd, options)
+	}
+	return session.TurnStart(ctx, threadID, text, cwd, options)
+}
+
+func turnSteerWithInputs(ctx context.Context, session Session, threadID, turnID, text string, inputs []control.UserInput) (map[string]any, error) {
+	if userInputsHaveLocalImage(inputs) {
+		rich, ok := session.(control.RichTurns)
+		if !ok {
+			return nil, errors.New("the active Codex app-server session does not support local image input")
+		}
+		return rich.TurnSteerInputs(ctx, threadID, turnID, inputs)
+	}
+	return session.TurnSteer(ctx, threadID, turnID, text)
+}
+
+func userInputsHaveLocalImage(inputs []control.UserInput) bool {
+	for _, input := range inputs {
+		if strings.EqualFold(strings.TrimSpace(input.Type), "localImage") && strings.TrimSpace(input.Path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) turnStartOptions(ctx context.Context, collaborationMode string, thread *model.Thread) appserver.TurnStartOptions {
@@ -2063,6 +2292,219 @@ func steerFailureImpliesActive(err error) bool {
 		strings.Contains(msg, "not steerable")
 }
 
+func threadWriterConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "active writer") ||
+		(strings.Contains(message, "thread-store conflict") && strings.Contains(message, "writer"))
+}
+
+func (s *Service) currentTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Service) touchTelegramWriterActivity() {
+	now := s.currentTime()
+	s.mu.Lock()
+	s.writerLastActivity = now
+	s.writerAutoReleaseAttempt = time.Time{}
+	s.mu.Unlock()
+}
+
+func (s *Service) markLiveThreadOwned(threadID string) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.liveOwnedThreads == nil {
+		s.liveOwnedThreads = map[string]struct{}{}
+	}
+	s.liveOwnedThreads[threadID] = struct{}{}
+	s.writerLastActivity = s.currentTime()
+	s.writerAutoReleaseAttempt = time.Time{}
+	s.mu.Unlock()
+}
+
+func (s *Service) ownsLiveThread(threadID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return false
+	}
+	s.mu.RLock()
+	_, ok := s.liveOwnedThreads[threadID]
+	s.mu.RUnlock()
+	return ok
+}
+
+func telegramWriterReleasedKey(threadID string) string {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return ""
+	}
+	return "writer.telegram.released." + threadID
+}
+
+func (s *Service) setTelegramWriterReleased(ctx context.Context, threadID string, released bool) error {
+	key := telegramWriterReleasedKey(threadID)
+	if key == "" {
+		return nil
+	}
+	value := ""
+	if released {
+		value = "true"
+	}
+	return s.store.SetState(ctx, key, value)
+}
+
+func (s *Service) telegramWriterReleased(ctx context.Context, threadID string) bool {
+	key := telegramWriterReleasedKey(threadID)
+	if key == "" {
+		return false
+	}
+	value, err := s.store.GetState(ctx, key)
+	return err == nil && strings.EqualFold(strings.TrimSpace(value), "true")
+}
+
+func (s *Service) bindThreadForTelegram(ctx context.Context, chatID, topicID int64, threadID string) (*DirectResponse, error) {
+	thread, err := s.store.GetThread(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if thread == nil {
+		return &DirectResponse{CallbackText: "会话不存在。", ThreadID: threadID}, nil
+	}
+	target := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}
+	if err := s.activateForegroundThread(ctx, target, threadID, true); err != nil {
+		return nil, err
+	}
+	if err := s.setTelegramWriterReleased(ctx, threadID, false); err != nil {
+		return nil, err
+	}
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	s.mu.RLock()
+	live := s.live
+	connected := s.liveConnected
+	s.mu.RUnlock()
+	if !connected || live == nil {
+		return &DirectResponse{CallbackText: "已切换，但 TG 控制通道尚未就绪，请使用 /repair。", ThreadID: threadID}, nil
+	}
+	if !s.ownsLiveThread(threadID) {
+		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		started := time.Now()
+		_, resumeErr := live.ThreadResume(requestCtx, threadID, thread.CWD)
+		cancel()
+		s.logAppServerCall("ThreadResume", started, resumeErr, live, lifecycleFields{
+			"operation": "bind_thread",
+			"thread_id": threadID,
+		})
+		if resumeErr != nil {
+			if threadWriterConflict(resumeErr) {
+				return &DirectResponse{CallbackText: "已切换，但另一个 Codex 客户端仍持有控制权。", ThreadID: threadID}, nil
+			}
+			return nil, resumeErr
+		}
+		s.markLiveThreadOwned(threadID)
+	}
+	return &DirectResponse{CallbackText: "已切换，TG 现已接管该会话。", ThreadID: threadID}, nil
+}
+
+func (s *Service) releaseTelegramWriters(ctx context.Context) (*DirectResponse, error) {
+	return s.releaseTelegramWritersWithIdleGuard(ctx, nil)
+}
+
+func (s *Service) releaseTelegramWritersIfStillIdle(ctx context.Context, idleSince time.Time) (*DirectResponse, error) {
+	return s.releaseTelegramWritersWithIdleGuard(ctx, &idleSince)
+}
+
+func (s *Service) releaseTelegramWritersWithIdleGuard(ctx context.Context, idleSince *time.Time) (*DirectResponse, error) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+
+	s.mu.Lock()
+	if idleSince != nil && (!s.writerLastActivity.Equal(*idleSince) || s.currentTime().Before(idleSince.Add(telegramWriterIdleTimeout))) {
+		s.mu.Unlock()
+		return &DirectResponse{Text: "Telegram activity resumed; automatic writer release was canceled."}, nil
+	}
+	live := s.live
+	connected := s.liveConnected
+	owned := make([]string, 0, len(s.liveOwnedThreads))
+	for threadID := range s.liveOwnedThreads {
+		owned = append(owned, threadID)
+	}
+	if len(owned) == 0 {
+		s.mu.Unlock()
+		return &DirectResponse{Text: "Telegram does not currently hold any task writer locks."}, nil
+	}
+	s.liveReleasing = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.liveReleasing = false
+		s.mu.Unlock()
+	}()
+
+	if !connected || live == nil {
+		return &DirectResponse{Text: "Telegram's live App Server is not connected; there is no writer session to release. Use /repair if it does not recover."}, nil
+	}
+	for _, threadID := range owned {
+		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		payload, err := live.ThreadRead(requestCtx, threadID, true)
+		cancel()
+		if err != nil {
+			return &DirectResponse{Text: fmt.Sprintf("Could not safely verify task %s, so no writer was released. Try /status or wait for the current run to finish.", threadID), ThreadID: threadID}, nil
+		}
+		current := appserver.SnapshotFromThreadRead(payload)
+		if snapshotBlocksWriterRelease(current) {
+			return &DirectResponse{Text: fmt.Sprintf("Task %s is still active in Telegram. No writer was released; wait for completion or use /stop first.", threadID), ThreadID: threadID, TurnID: current.LatestTurnID}, nil
+		}
+	}
+	for _, threadID := range owned {
+		if err := s.setTelegramWriterReleased(ctx, threadID, true); err != nil {
+			return nil, err
+		}
+	}
+
+	newLive := s.liveFactory()
+	s.mu.Lock()
+	s.live = newLive
+	s.liveConnected = false
+	s.liveEvents = nil
+	s.liveGeneration++
+	s.liveOwnedThreads = map[string]struct{}{}
+	s.writerLastActivity = time.Time{}
+	s.writerAutoReleaseAttempt = time.Time{}
+	s.mu.Unlock()
+	if err := live.Close(); err != nil {
+		s.logLifecycle("telegram_writer_release_close_failed", lifecycleFields{"error": err})
+	}
+	s.ensureLiveSessionLocked(ctx)
+	s.mu.RLock()
+	reconnected := s.liveConnected
+	s.mu.RUnlock()
+	if !reconnected {
+		return &DirectResponse{Text: "Telegram writer locks were released, but the new live App Server did not reconnect. Use /repair, then retry.", CallbackText: "TG locks released; live session reconnect failed.", WriterReleased: true}, nil
+	}
+	s.logLifecycle("telegram_writer_release_completed", lifecycleFields{"released_threads": len(owned)})
+	return &DirectResponse{Text: fmt.Sprintf("已释放 %d 个空闲会话的 TG 控制权，Codex Desktop 现在可以打开这些会话。需要时可点击「由 TG 接管」。", len(owned)), CallbackText: "已释放 TG 控制权。", WriterReleased: true}, nil
+}
+
+func snapshotBlocksWriterRelease(snapshot appserver.ThreadReadSnapshot) bool {
+	if snapshot.WaitingOnApproval || snapshot.WaitingOnReply {
+		return true
+	}
+	if isTerminalStatus(snapshot.LatestTurnStatus) {
+		return false
+	}
+	return strings.EqualFold(snapshot.LatestTurnStatus, "inProgress") || threadLooksActiveForPolling(snapshot.Thread)
+}
+
 func steerFailureMeansNoActiveTurn(err error) bool {
 	if err == nil {
 		return false
@@ -2148,6 +2590,10 @@ func (s *Service) interruptTurn(ctx context.Context, chatID, topicID int64, thre
 			"operation": "interrupt_turn",
 			"thread_id": threadID,
 		})
+		if err == nil {
+			s.markLiveThreadOwned(threadID)
+			_ = s.setTelegramWriterReleased(ctx, threadID, false)
+		}
 	}
 	if refreshed, err := s.refreshThreadForOperation(ctx, live, threadID, "interrupt_turn_before_stop"); err == nil && refreshed != nil {
 		thread = refreshed
@@ -2264,21 +2710,115 @@ func (s *Service) threadsOverview(ctx context.Context, rest string) (*DirectResp
 			search = trimmed
 		}
 	}
-	threads, err := s.store.ListThreads(ctx, limit, search)
+	if limit < 1 {
+		limit = 8
+	}
+	if limit > observerRecentThreadLimit {
+		limit = observerRecentThreadLimit
+	}
+	threads, ready, err := s.runtimeThreads(ctx, limit, search)
 	if err != nil {
 		return nil, err
 	}
-	lines := []string{"All chats"}
+	if !ready {
+		return &DirectResponse{Text: "可用会话\n会话服务暂未就绪，请使用 /status 检查连接。"}, nil
+	}
 	if len(threads) == 0 {
-		lines = append(lines, "No cached threads yet. Try /status or wait for sync.")
-		return &DirectResponse{Text: strings.Join(lines, "\n")}, nil
+		return &DirectResponse{Text: "可用会话\n暂无可用会话，请稍后重试或使用 /status 检查同步状态。"}, nil
 	}
 	buttons := [][]model.ButtonSpec{}
-	for index, thread := range threads {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   %s | %s | %s\n   %s", index+1, strings.TrimSpace(thread.Title), thread.ProjectName, thread.DirectoryName, thread.ShortID(), trimPreview(thread.LastPreview)))
-		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, fmt.Sprintf("Open %d", index+1), "show_thread", thread.ID, "", "", nil)})
+	for _, thread := range threads {
+		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, threadSelectionTitle(thread), "switch_thread", thread.ID, "", "", nil)})
 	}
-	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+	return &DirectResponse{Text: "可用会话\n点击标题打开。", Buttons: buttons}, nil
+}
+
+func (s *Service) runtimeThreads(ctx context.Context, limit int, search string) ([]model.Thread, bool, error) {
+	s.mu.RLock()
+	live := s.live
+	poll := s.poll
+	liveConnected := s.liveConnected
+	pollConnected := s.pollConnected
+	s.mu.RUnlock()
+	var session Session
+	if liveConnected && live != nil {
+		session = live
+	} else if pollConnected && poll != nil {
+		session = poll
+	}
+	if session == nil {
+		return nil, false, nil
+	}
+	requestLimit := limit
+	if strings.TrimSpace(search) != "" && requestLimit < observerRecentThreadLimit {
+		requestLimit = observerRecentThreadLimit
+	}
+	if requestLimit <= 0 {
+		requestLimit = 8
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	result, err := session.ThreadList(requestCtx, requestLimit, "")
+	if err != nil {
+		return nil, true, err
+	}
+	threads := appserver.ThreadsFromList(result)
+	for index, thread := range threads {
+		if existing, getErr := s.store.GetThread(ctx, thread.ID); getErr == nil && existing != nil {
+			thread = s.mergeRuntimeThreadMetadata(ctx, thread, *existing)
+			threads[index] = thread
+		}
+		_ = s.store.UpsertThread(ctx, thread)
+	}
+	query := strings.ToLower(strings.TrimSpace(search))
+	filtered := make([]model.Thread, 0, min(limit, len(threads)))
+	for _, thread := range threads {
+		if query != "" {
+			haystack := strings.ToLower(strings.Join([]string{thread.Title, thread.ProjectName, thread.LastPreview, thread.ID}, "\n"))
+			if !strings.Contains(haystack, query) {
+				continue
+			}
+		}
+		filtered = append(filtered, thread)
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered, true, nil
+}
+
+func threadSelectionTitle(thread model.Thread) string {
+	title := compactThreadSelectionText(thread.Title)
+	if threadSelectionTitleIsPlaceholder(title, thread.ID) {
+		if preview := compactThreadSelectionText(thread.LastPreview); preview != "" {
+			title = preview
+		}
+	}
+	if title == "" || threadSelectionTitleIsPlaceholder(title, thread.ID) {
+		title = "未命名会话"
+	}
+	return shortButtonLabel(title)
+}
+
+func compactThreadSelectionText(value string) string {
+	value = strings.TrimSpace(cleanTelegramNilLiteral(value))
+	if line, _, found := strings.Cut(strings.ReplaceAll(value, "\r\n", "\n"), "\n"); found {
+		value = line
+	}
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func threadSelectionTitleIsPlaceholder(title, threadID string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(title))
+	if normalized == "" || strings.EqualFold(normalized, strings.TrimSpace(threadID)) || codexThreadIDPattern.MatchString(normalized) {
+		return true
+	}
+	switch normalized {
+	case "new chat", "new-chat", "new thread", "new-thread", "untitled", "无标题":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) showThread(ctx context.Context, chatID, topicID int64, threadID string, forceNew bool) (*DirectResponse, error) {
@@ -2299,11 +2839,18 @@ func (s *Service) showThread(ctx context.Context, chatID, topicID int64, threadI
 	case liveConnected && live != nil:
 		if refreshed, refreshErr := s.refreshThread(ctx, live, threadID); refreshErr == nil && refreshed != nil {
 			thread = refreshed
+		} else if isThreadNotLoadedError(refreshErr) {
+			return &DirectResponse{Text: "该会话不属于当前 Telegram runtime，无法打开。请使用 /threads 查看可用会话。"}, nil
 		}
 	case pollConnected && poll != nil:
 		if refreshed, refreshErr := s.refreshThread(ctx, poll, threadID); refreshErr == nil && refreshed != nil {
 			thread = refreshed
+		} else if isThreadNotLoadedError(refreshErr) {
+			return &DirectResponse{Text: "该会话不属于当前 Telegram runtime，无法打开。请使用 /threads 查看可用会话。"}, nil
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(thread.Status), "notLoaded") {
+		return &DirectResponse{Text: "该会话不属于当前 Telegram runtime，无法打开。请使用 /threads 查看可用会话。"}, nil
 	}
 	target := model.ObserverTarget{
 		ChatKey: model.ChatKey(chatID, topicID),
@@ -2311,8 +2858,35 @@ func (s *Service) showThread(ctx context.Context, chatID, topicID int64, threadI
 		TopicID: topicID,
 		Enabled: true,
 	}
+	if err := s.activateForegroundThread(ctx, target, thread.ID, true); err != nil {
+		return nil, err
+	}
 	s.syncThreadPanelToTarget(ctx, target, thread.ID, forceNew, model.PanelSourceExplicit)
 	return &DirectResponse{ThreadID: thread.ID}, nil
+}
+
+func (s *Service) switchThread(ctx context.Context, chatID, topicID, messageID int64, threadID string) (*DirectResponse, error) {
+	bound, err := s.bindThreadForTelegram(ctx, chatID, topicID, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if bound == nil || strings.TrimSpace(bound.ThreadID) == "" {
+		return bound, nil
+	}
+	response, err := s.showThread(ctx, chatID, topicID, threadID, true)
+	if err != nil || response == nil || strings.TrimSpace(response.ThreadID) == "" {
+		return response, err
+	}
+	s.mu.RLock()
+	sender := s.sender
+	s.mu.RUnlock()
+	if sender != nil && messageID != 0 {
+		if err := sender.DeleteMessage(ctx, chatID, topicID, messageID); err != nil {
+			s.setError(ctx, fmt.Errorf("delete thread switch source message: %w", err))
+		}
+	}
+	response.CallbackText = "已切换至该会话。"
+	return response, nil
 }
 
 func (s *Service) contextCard(ctx context.Context, chatID, topicID int64) (string, error) {
@@ -2348,14 +2922,14 @@ func threadIDResponse(threadID, turnID string) *DirectResponse {
 	threadID = strings.TrimSpace(threadID)
 	turnID = strings.TrimSpace(turnID)
 	if threadID == "" {
-		return &DirectResponse{Text: "Thread ID is not available for this message."}
+		return &DirectResponse{Text: "这条消息没有可用的会话 ID。"}
 	}
 	responseTurnID := turnID
 	if turnID == "" {
 		turnID = "-"
 	}
 	return &DirectResponse{
-		Text:     fmt.Sprintf("Thread ID:\n%s\n\nTurn ID:\n%s", threadID, turnID),
+		Text:     fmt.Sprintf("会话 ID：\n%s\n\n运行 ID：\n%s", threadID, turnID),
 		ThreadID: threadID,
 		TurnID:   responseTurnID,
 	}
@@ -2721,7 +3295,8 @@ func mergeThreadMetadata(current, fallback model.Thread) model.Thread {
 	if strings.TrimSpace(current.ID) == "" {
 		current.ID = fallback.ID
 	}
-	if strings.TrimSpace(current.Title) == "" {
+	if strings.TrimSpace(current.Title) == "" ||
+		(threadSelectionTitleIsPlaceholder(current.Title, current.ID) && !threadSelectionTitleIsPlaceholder(fallback.Title, fallback.ID)) {
 		current.Title = fallback.Title
 	}
 	if strings.TrimSpace(current.CWD) == "" {
@@ -2813,7 +3388,7 @@ func (s *Service) refreshThreadForOperation(ctx context.Context, client Session,
 	current.Thread.Raw, _ = json.Marshal(payload)
 	thread := current.Thread
 	if existing, _ := s.store.GetThread(ctx, threadID); existing != nil {
-		thread = mergeThreadMetadata(thread, *existing)
+		thread = s.mergeRuntimeThreadMetadata(ctx, thread, *existing)
 	} else if thread.ID == "" {
 		thread.ID = threadID
 	}
@@ -2909,16 +3484,16 @@ func (s *Service) renderObserverEvent(ctx context.Context, event model.ObserverE
 	}
 	buttons := [][]model.ButtonSpec{
 		{
-			s.callbackButton(ctx, "Show", "show_thread", event.ThreadID, event.TurnID, "", nil),
-			s.callbackButton(ctx, "Bind here", "bind_here", event.ThreadID, event.TurnID, "", nil),
+			s.callbackButton(ctx, "显示卡片", "show_thread", event.ThreadID, event.TurnID, "", nil),
+			s.callbackButton(ctx, "由 TG 接管", "bind_here", event.ThreadID, event.TurnID, "", nil),
 		},
 		{
-			s.callbackButton(ctx, "Reply", "reply_hint", event.ThreadID, event.TurnID, "", nil),
-			s.callbackButton(ctx, "Observe here", "observe_all", event.ThreadID, event.TurnID, "", nil),
+			s.callbackButton(ctx, "发送回复", "reply_hint", event.ThreadID, event.TurnID, "", nil),
+			s.callbackButton(ctx, "在此观察", "observe_all", event.ThreadID, event.TurnID, "", nil),
 		},
 	}
 	if event.TurnID != "" {
-		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, "Stop", "stop_turn", event.ThreadID, event.TurnID, "", nil)})
+		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, "停止", "stop_turn", event.ThreadID, event.TurnID, "", nil)})
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons, ThreadID: event.ThreadID, TurnID: event.TurnID, ItemID: event.ItemID, EventID: event.EventID}
 }
@@ -2938,12 +3513,12 @@ func (s *Service) renderPendingApproval(ctx context.Context, approval model.Pend
 	}
 	buttons := [][]model.ButtonSpec{
 		{
-			s.callbackButton(ctx, "Approve", "approve", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
-			s.callbackButton(ctx, "Approve Session", "approve_session", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
+			s.callbackButton(ctx, "允许", "approve", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
+			s.callbackButton(ctx, "本次会话允许", "approve_session", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
 		},
 		{
-			s.callbackButton(ctx, "Deny", "deny", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
-			s.callbackButton(ctx, "Cancel", "cancel", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
+			s.callbackButton(ctx, "拒绝", "deny", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
+			s.callbackButton(ctx, "取消", "cancel", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
 		},
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons, ThreadID: approval.ThreadID, TurnID: approval.TurnID, ItemID: approval.ItemID, EventID: approval.RequestID}

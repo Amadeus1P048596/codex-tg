@@ -79,8 +79,10 @@ To start a new thread from Telegram, open `/projects`, choose a project, press
 project must already exist in the cached Codex thread list.
 
 Codex UI Chats stored under `Documents/Codex` appear under the `Chats` section
-instead of as normal projects. Use `Open Chats` for the full paginated list, or
-`/newchat <prompt>` to create a new Codex UI Chat under
-`Documents/Codex/<date>/<prompt-slug>`. Use `/newthread <prompt>` for a thread
-without choosing a project or creating a Chat folder; App Server may still
-attach the daemon default cwd.
+instead of as normal projects. Use `Open Chats` for the full paginated list.
+Send `/newchat`, then send the first prompt as the next message, to create a new
+Codex UI Chat under `Documents/Codex/<date>/<prompt-slug>`. Send `/newthread`
+for the same two-step interaction without choosing a project or creating a Chat
+folder. `/newchat <prompt>` and `/newthread <prompt>` remain available as
+one-line shortcuts, and `/cancel` cancels either pending flow. App Server may
+still attach the daemon default cwd to `/newthread` threads.

@@ -50,7 +50,7 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 		}
 		seen[command.Command] = true
 	}
-	for _, command := range []string{"newchat", "newthread"} {
+	for _, command := range []string{"home", "current", "inbox", "newchat", "newthread", "cancel", "title", "archive", "unarchive", "release"} {
 		if !seen[command] {
 			t.Fatalf("defaultCommands must expose /%s in the Telegram command menu", command)
 		}
@@ -157,6 +157,83 @@ func TestBotSendDocumentReturnsTelegramMessageID(t *testing.T) {
 	}
 	if got, want := messageID, int64(555); got != want {
 		t.Fatalf("messageID = %d, want %d", got, want)
+	}
+}
+
+func TestLargestTelegramPhotoSelectsHighestResolution(t *testing.T) {
+	t.Parallel()
+
+	photo, ok := largestTelegramPhoto([]PhotoSize{
+		{FileID: "small", Width: 90, Height: 90, FileSize: 100},
+		{FileID: "large", Width: 1280, Height: 720, FileSize: 1000},
+		{FileID: "medium", Width: 640, Height: 480, FileSize: 500},
+	})
+	if !ok || photo.FileID != "large" {
+		t.Fatalf("photo=%#v ok=%v, want large", photo, ok)
+	}
+}
+
+func TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored(t *testing.T) {
+	t.Parallel()
+
+	var getFileCalls int
+	var downloadCalls int
+	var sendCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/getFile":
+			getFileCalls++
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"photo-large","file_size":8,"file_path":"photos/input.jpg"}}`))
+		case "/photos/input.jpg":
+			downloadCalls++
+			_, _ = w.Write([]byte("jpegdata"))
+		case "/sendMessage":
+			sendCalls++
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":778,"chat":{"id":42,"type":"private"}}}`))
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	cfg := config.Config{
+		Paths: config.Paths{
+			Home: root, DataDir: filepath.Join(root, "data"), LogDir: filepath.Join(root, "logs"), DBPath: filepath.Join(root, "data", "state.sqlite"),
+		},
+		AllowedUserIDs: []int64{7},
+	}
+	service, err := daemon.New(cfg)
+	if err != nil {
+		t.Fatalf("daemon.New failed: %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	client.fileBaseURL = server.URL
+	bot := &Bot{cfg: cfg, client: client, service: service}
+	err = bot.handleMessage(context.Background(), Message{
+		MessageID: 1,
+		From:      &User{ID: 7},
+		Chat:      Chat{ID: 42, Type: "private"},
+		Photo: []PhotoSize{
+			{FileID: "photo-small", Width: 100, Height: 100},
+			{FileID: "photo-large", Width: 1000, Height: 800, FileSize: 8},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMessage failed: %v", err)
+	}
+	if getFileCalls != 1 || downloadCalls != 1 || sendCalls != 1 {
+		t.Fatalf("calls getFile=%d download=%d send=%d, want 1/1/1", getFileCalls, downloadCalls, sendCalls)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "data", "telegram-inputs"))
+	if err != nil {
+		t.Fatalf("ReadDir telegram-inputs failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary photo inputs were not removed: %#v", entries)
 	}
 }
 

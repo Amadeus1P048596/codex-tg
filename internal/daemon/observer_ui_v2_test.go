@@ -19,6 +19,8 @@ type recordedMessage struct {
 	messageID int64
 	text      string
 	entities  []model.MessageEntity
+	parseMode string
+	plainText string
 	buttons   [][]model.ButtonSpec
 	options   model.SendOptions
 }
@@ -51,7 +53,7 @@ func (s *recordingSender) SendRenderedMessages(ctx context.Context, chatID, topi
 	ids := make([]int64, 0, len(messages))
 	for _, message := range messages {
 		messageID := int64(len(s.messages) + 1)
-		s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: message.Text, entities: message.Entities, buttons: buttons, options: options})
+		s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: message.Text, entities: message.Entities, parseMode: message.ParseMode, plainText: message.PlainText, buttons: buttons, options: options})
 		ids = append(ids, messageID)
 	}
 	return ids, nil
@@ -69,7 +71,7 @@ func (s *recordingSender) EditRenderedMessage(ctx context.Context, chatID, topic
 	if s.editErr != nil {
 		return s.editErr
 	}
-	s.edits = append(s.edits, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: rendered.Text, entities: rendered.Entities, buttons: buttons})
+	s.edits = append(s.edits, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: rendered.Text, entities: rendered.Entities, parseMode: rendered.ParseMode, plainText: rendered.PlainText, buttons: buttons})
 	return nil
 }
 
@@ -103,8 +105,19 @@ func hasRecordedEntity(entities []model.MessageEntity, entityType, language stri
 }
 
 func hasHeaderKind(text, kind string) bool {
-	firstLine := strings.SplitN(text, "\n", 2)[0]
-	return strings.Contains(firstLine, "["+kind+"]")
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "final":
+		return strings.Contains(text, "<b>已完成</b>") || strings.Contains(text, "<b>失败</b>") || strings.Contains(text, "<b>已取消</b>")
+	case "commentary":
+		return strings.Contains(text, "<b>处理中</b>") || strings.Contains(text, "<b>需要输入</b>")
+	case "plan":
+		return strings.Contains(text, "<b>Codex</b> · <b>需要输入</b>")
+	case "user":
+		return strings.Contains(text, "<b>Codex</b> · <b>请求</b>")
+	}
+	headerLines := strings.SplitN(text, "\n", 4)
+	header := strings.Join(headerLines[:minInt(3, len(headerLines))], "\n")
+	return strings.Contains(header, "["+kind+"]") || strings.Contains(header, visualRole(kind))
 }
 
 func finalMessages(messages []recordedMessage) []recordedMessage {
@@ -127,7 +140,66 @@ func lastFinalMessage(t *testing.T, messages []recordedMessage) recordedMessage 
 }
 
 func hasThreadChip(text, threadID string) bool {
-	return strings.Contains(strings.SplitN(text, "\n", 2)[0], "[T:"+visualShortID(threadID)+"]")
+	headerLines := strings.SplitN(text, "\n", 4)
+	header := strings.Join(headerLines[:minInt(3, len(headerLines))], "\n")
+	shortID := visualShortID(threadID)
+	return strings.Contains(header, "[T:"+shortID+"]") || strings.Contains(header, "T:"+shortID)
+}
+
+func hasRecordedEntityForText(message recordedMessage, entityType, text string) bool {
+	index := strings.Index(message.text, text)
+	if index < 0 {
+		return false
+	}
+	wantOffset := visualUTF16Len(message.text[:index])
+	wantLength := visualUTF16Len(text)
+	for _, entity := range message.entities {
+		if entity.Type == entityType && entity.Offset == wantOffset && entity.Length == wantLength {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUserAndFinalCardsEmphasizeIdentityStatusAndTiming(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "thread-card-hierarchy",
+		Title:       "Investigate sync status",
+		ProjectName: "Codex",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          "turn-card-hierarchy",
+		LatestTurnStatus:      "completed",
+		LatestTurnStartedAt:   "2026-08-20T10:00:00Z",
+		LatestTurnUpdatedAt:   "2026-08-20T10:01:19Z",
+		LatestUserMessageText: "Check the task.",
+		LatestFinalText:       "The task completed.",
+	}
+
+	user := service.renderUserRequestNoticeCard(ctx, thread, snapshot)[0]
+	if user.ParseMode != "HTML" || !strings.Contains(user.Text, "<b>Codex</b> · <b>请求</b>") {
+		t.Fatalf("user card = %#v, want HTML request hierarchy", user)
+	}
+	if !strings.Contains(user.Text, "<code>T:thread · R:turn</code>") {
+		t.Fatalf("user card = %#v, want collapsed code metadata", user)
+	}
+
+	final, _, _ := service.renderFinalCard(ctx, 1, thread, snapshot)
+	marker := service.visualMarker(ctx, thread.ID)
+	for _, want := range []string{marker + " <b>Investigate sync status</b>\n<b>Codex</b> · <b>已完成</b> · 1m 19s", "<code>T:thread · R:turn</code>"} {
+		if !strings.Contains(final.Text, want) {
+			t.Fatalf("final card = %#v, want %q", final, want)
+		}
+	}
+	if strings.Index(final.Text, "1m 19s") > strings.Index(final.Text, snapshot.LatestFinalText) {
+		t.Fatalf("final card text = %q, want timing in header before response body", final.Text)
+	}
 }
 
 func TestSyncThreadPanelDoesNotDuplicateFinalAnswerOnRepeatedSync(t *testing.T) {
@@ -168,14 +240,14 @@ func TestSyncThreadPanelDoesNotDuplicateFinalAnswerOnRepeatedSync(t *testing.T) 
 	if finalCount != 1 {
 		t.Fatalf("final message count = %d, want 1; messages=%#v", finalCount, sender.messages)
 	}
-	if len(sender.messages) != 4 {
-		t.Fatalf("message count = %d, want 3 live trio messages plus Final on first sync only; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one Final card on first sync only; messages=%#v", len(sender.messages), sender.messages)
 	}
 	if len(sender.documents) != 0 {
 		t.Fatalf("documents = %#v, want no tool documents for a completed turn without tool output", sender.documents)
 	}
-	if len(sender.deletes) != 3 {
-		t.Fatalf("deletes = %#v, want best-effort delete for commentary/tool/output messages", sender.deletes)
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want stable single-card lifecycle", sender.deletes)
 	}
 
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
@@ -230,15 +302,15 @@ func TestSyncThreadPanelFormatsFinalAnswerMarkdownWithEntities(t *testing.T) {
 	if strings.Contains(final.text, "```") {
 		t.Fatalf("final message still contains raw markdown fence: %q", final.text)
 	}
-	if !hasRecordedEntity(final.entities, "code", "") {
-		t.Fatalf("final entities = %#v, want inline code entity", final.entities)
+	if final.parseMode != "HTML" || !strings.Contains(final.text, "<code>rg</code>") {
+		t.Fatalf("final = %#v, want HTML inline code", final)
 	}
-	if !hasRecordedEntity(final.entities, "pre", "bash") {
-		t.Fatalf("final entities = %#v, want bash pre entity", final.entities)
+	if !strings.Contains(final.text, `<pre><code class="language-bash">`) {
+		t.Fatalf("final = %#v, want bash pre block", final)
 	}
 }
 
-func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) {
+func TestFinalTransitionEditsWorkingCardInPlaceWithoutDeletes(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -273,20 +345,10 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	}
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
-	if len(sender.messages) != 5 {
-		t.Fatalf("messages = %#v, want New run + [User] + trio", sender.messages)
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0].text, "<b>处理中</b>") {
+		t.Fatalf("messages = %#v, want one Working card", sender.messages)
 	}
-	if strings.Contains(sender.messages[0].text, "Status:") {
-		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
-	}
-	if strings.Contains(sender.messages[1].text, "Status:") {
-		t.Fatalf("user notice text = %q, want no status", sender.messages[1].text)
-	}
-	runNoticeID := sender.messages[0].messageID
-	userID := sender.messages[1].messageID
-	summaryID := sender.messages[2].messageID
-	toolID := sender.messages[3].messageID
-	outputID := sender.messages[4].messageID
+	summaryID := sender.messages[0].messageID
 
 	completed := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
 		Thread:                thread,
@@ -309,23 +371,15 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.deletes) != 4 {
-		t.Fatalf("deletes = %#v, want commentary + New run + tool + output deletes", sender.deletes)
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
 	}
-	wantDeletes := []int64{summaryID, runNoticeID, toolID, outputID}
-	for index, want := range wantDeletes {
-		if sender.deletes[index].messageID != want {
-			t.Fatalf("delete[%d] = %d, want %d; deletes=%#v", index, sender.deletes[index].messageID, want, sender.deletes)
-		}
+	if len(sender.edits) != 1 {
+		t.Fatalf("edits = %#v, want one in-place final edit", sender.edits)
 	}
-	for _, deleteMessage := range sender.deletes {
-		if deleteMessage.messageID == userID {
-			t.Fatalf("[User] message %d was deleted unexpectedly: %#v", userID, sender.deletes)
-		}
-	}
-	final := lastFinalMessage(t, sender.messages)
-	if !hasHeaderKind(final.text, "Final") || final.options.Silent {
-		t.Fatalf("final = %#v, want audible Final message", final)
+	final := sender.edits[0]
+	if final.messageID != summaryID || !hasHeaderKind(final.text, "Final") {
+		t.Fatalf("final = %#v, want Completed edit on Working message %d", final, summaryID)
 	}
 	finalText := final.text
 	if strings.Contains(finalText, "[commentary]") || strings.Contains(finalText, "This completed commentary belongs in Details only.") {
@@ -335,8 +389,8 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.SummaryMessageID != final.messageID || panel.LastFinalNoticeFP != "final-cleanup-fp" {
-		t.Fatalf("panel = %#v, want SummaryMessageID moved to final message %d with final fp", panel, final.messageID)
+	if panel == nil || panel.SummaryMessageID != summaryID || panel.LastFinalNoticeFP != "final-cleanup-fp" {
+		t.Fatalf("panel = %#v, want SummaryMessageID retained at %d with final fp", panel, summaryID)
 	}
 	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, final.messageID)
 	if err != nil {
@@ -387,17 +441,8 @@ func TestSummaryPanelFormatsCommentaryMarkdownWithoutFinalLabel(t *testing.T) {
 		t.Fatal("no summary message was sent")
 	}
 	summary := sender.messages[0]
-	if hasHeaderKind(summary.text, "Final") {
-		t.Fatalf("summary text = %q, must not label commentary as final", summary.text)
-	}
-	if strings.Contains(summary.text, "```") {
-		t.Fatalf("summary text still contains raw markdown fence: %q", summary.text)
-	}
-	if !hasRecordedEntity(summary.entities, "code", "") {
-		t.Fatalf("summary entities = %#v, want inline code entity", summary.entities)
-	}
-	if !hasRecordedEntity(summary.entities, "pre", "powershell") {
-		t.Fatalf("summary entities = %#v, want powershell pre entity", summary.entities)
+	if !hasHeaderKind(summary.text, "commentary") || strings.Contains(summary.text, "Checking `node`") || strings.Contains(summary.text, "node -v") {
+		t.Fatalf("summary = %#v, want stable Working card without raw commentary events", summary)
 	}
 }
 
@@ -426,17 +471,13 @@ func TestSummaryPanelDisplaysAgentMessagesChronologically(t *testing.T) {
 		t.Fatalf("len(messages) = %d, want 1", len(messages))
 	}
 	text := messages[0].Text
-	first := strings.Index(text, "FIRST oldest")
-	second := strings.Index(text, "SECOND middle")
-	third := strings.Index(text, "THIRD newest")
-	if first < 0 || second < 0 || third < 0 {
-		t.Fatalf("summary text missing expected entries: %q", text)
+	if !strings.Contains(text, "<b>处理中</b>") || !strings.Contains(text, "正在处理请求") {
+		t.Fatalf("summary text = %q, want stable Working state", text)
 	}
-	if !(first < second && second < third) {
-		t.Fatalf("summary text order is not chronological: %q", text)
-	}
-	if strings.Contains(text, "1. [commentary]") || strings.Contains(text, "2. [commentary]") || strings.Contains(text, "3. [commentary]") {
-		t.Fatalf("summary text must not number commentary entries: %q", text)
+	for _, raw := range []string{"FIRST oldest", "SECOND middle", "THIRD newest", "[commentary]"} {
+		if strings.Contains(text, raw) {
+			t.Fatalf("summary text leaked raw commentary %q: %q", raw, text)
+		}
 	}
 }
 
@@ -465,8 +506,8 @@ func TestSummaryPanelRemovesNilLiteralBeforeRendering(t *testing.T) {
 	if strings.Contains(messages[0].Text, "<nil>") {
 		t.Fatalf("summary text leaked nil literal: %q", messages[0].Text)
 	}
-	if !strings.Contains(messages[0].Text, "Before  after") {
-		t.Fatalf("summary text = %q, want sanitized agent text", messages[0].Text)
+	if strings.Contains(messages[0].Text, "Before") || !strings.Contains(messages[0].Text, "正在处理请求") {
+		t.Fatalf("summary text = %q, want aggregator-owned progress copy", messages[0].Text)
 	}
 }
 
@@ -508,14 +549,11 @@ func TestSyncThreadPanelDoesNotUseDocumentDeliveryForToolOutput(t *testing.T) {
 	if len(sender.documents) != 0 {
 		t.Fatalf("documents = %#v, want no SendDocument path for tool output", sender.documents)
 	}
-	if len(sender.messages) != 3 {
-		t.Fatalf("message count = %d, want 3 trio messages only", len(sender.messages))
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one aggregated status card", len(sender.messages))
 	}
-	if got := sender.messages[1].text; strings.HasPrefix(got, "<pre><code>[Tool]") || !strings.Contains(got, "[Shell:pwsh (PowerShell)]\n<pre><code class=\"language-powershell\">node -v</code></pre>") {
-		t.Fatalf("tool message = %q, want shell line and command-only HTML code block", got)
-	}
-	if got := sender.messages[2].text; strings.HasPrefix(got, "<pre><code>[Output]") || !strings.Contains(got, "<pre><code>v22.22.2</code></pre>") {
-		t.Fatalf("output message = %q, want plain header and output-only HTML code block", got)
+	if got := sender.messages[0].text; strings.Contains(got, "[Tool]") || strings.Contains(got, "[Output]") || strings.Contains(got, "v22.22.2") || !strings.Contains(got, "1 次操作") {
+		t.Fatalf("status card = %q, want operation count without raw tool/output cards", got)
 	}
 }
 
@@ -553,40 +591,25 @@ func TestGlobalObserverSyncSendsUserRequestNoticeOnceBeforeTrio(t *testing.T) {
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 5 {
-		t.Fatalf("message count = %d, want 5 (New run + [User] + trio once); messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0].text, "<b>处理中</b>") {
+		t.Fatalf("messages = %#v, want one Working card across repeated observer sync", sender.messages)
 	}
-	if !strings.Contains(sender.messages[0].text, "New run:") {
-		t.Fatalf("first message = %q, want New run before [User]", sender.messages[0].text)
-	}
-	if strings.Contains(sender.messages[0].text, "Status:") {
-		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
-	}
-	if !hasHeaderKind(sender.messages[1].text, "User") {
-		t.Fatalf("second message = %q, want [User] before trio", sender.messages[1].text)
-	}
-	if strings.Contains(sender.messages[1].text, "Status:") {
-		t.Fatalf("user notice text = %q, want no status", sender.messages[1].text)
-	}
-	if strings.Contains(sender.messages[1].text, "```") {
-		t.Fatalf("user notice contains raw markdown: %q", sender.messages[1].text)
-	}
-	if !hasRecordedEntity(sender.messages[1].entities, "code", "") {
-		t.Fatalf("user notice entities = %#v, want inline code entity", sender.messages[1].entities)
+	if strings.Contains(sender.messages[0].text, "New run:") || hasHeaderKind(sender.messages[0].text, "User") || strings.Contains(sender.messages[0].text, "Check `node -v`") {
+		t.Fatalf("status card leaked separate run/user event UI: %q", sender.messages[0].text)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.RunNoticeMessageID != sender.messages[0].messageID || panel.UserMessageID != sender.messages[1].messageID || panel.LastUserNoticeFP != "user-fp-1" {
-		t.Fatalf("panel notice state = %#v, want run id %d and user id %d / user-fp-1", panel, sender.messages[0].messageID, sender.messages[1].messageID)
+	if panel == nil || panel.SummaryMessageID != sender.messages[0].messageID || panel.RunNoticeMessageID != 0 || panel.UserMessageID != 0 {
+		t.Fatalf("panel notice state = %#v, want only summary message %d", panel, sender.messages[0].messageID)
 	}
-	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, sender.messages[1].messageID)
+	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, sender.messages[0].messageID)
 	if err != nil {
 		t.Fatalf("ResolveMessageRoute failed: %v", err)
 	}
-	if route == nil || route.ThreadID != thread.ID || route.TurnID != "turn-user-notice" || route.ItemID != "user-item-1" {
-		t.Fatalf("user notice route = %#v, want thread/turn/item route", route)
+	if route == nil || route.ThreadID != thread.ID || route.TurnID != "turn-user-notice" {
+		t.Fatalf("status route = %#v, want thread/turn route", route)
 	}
 }
 
@@ -624,30 +647,18 @@ func TestGlobalObserverSyncCreatesRunNoticeAndUserPlaceholderBeforeTrioWithoutUs
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 5 {
-		t.Fatalf("messages = %#v, want New run + [User placeholder] + trio", sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one Working card", sender.messages)
 	}
-	if !strings.Contains(sender.messages[0].text, "New run:") {
-		t.Fatalf("first message = %q, want New run", sender.messages[0].text)
-	}
-	if strings.Contains(sender.messages[0].text, "Status:") {
-		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
-	}
-	if !hasHeaderKind(sender.messages[1].text, "User") || !strings.Contains(sender.messages[1].text, "User prompt was not available") {
-		t.Fatalf("second message = %q, want [User] placeholder", sender.messages[1].text)
-	}
-	if strings.Contains(sender.messages[1].text, "Status:") {
-		t.Fatalf("user placeholder text = %q, want no status", sender.messages[1].text)
-	}
-	if !hasHeaderKind(sender.messages[2].text, "commentary") || !hasHeaderKind(sender.messages[3].text, "Tool") || !hasHeaderKind(sender.messages[4].text, "Output") {
-		t.Fatalf("messages = %#v, want trio after New run and [User]", sender.messages)
+	if got := sender.messages[0].text; !strings.Contains(got, "<b>进度</b>") || !strings.Contains(got, "Start-Sleep -Seconds 900") || strings.Contains(got, "User prompt was not available") {
+		t.Fatalf("status card = %q, want current command without placeholder/debug cards", got)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.RunNoticeMessageID != sender.messages[0].messageID || panel.UserMessageID != sender.messages[1].messageID || panel.LastUserNoticeFP != "" {
-		t.Fatalf("panel = %#v, want run notice id and user placeholder id without user fp", panel)
+	if panel == nil || panel.SummaryMessageID != sender.messages[0].messageID || panel.RunNoticeMessageID != 0 || panel.UserMessageID != 0 {
+		t.Fatalf("panel = %#v, want one summary message only", panel)
 	}
 }
 
@@ -683,10 +694,10 @@ func TestLateUserPromptEditsExistingUserPlaceholder(t *testing.T) {
 	}
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
-	if len(sender.messages) != 5 || !strings.Contains(sender.messages[0].text, "New run:") || !hasHeaderKind(sender.messages[1].text, "User") {
-		t.Fatalf("initial messages = %#v, want New run + [User placeholder] + trio", sender.messages)
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0].text, "<b>处理中</b>") {
+		t.Fatalf("initial messages = %#v, want one Working card", sender.messages)
 	}
-	userMessageID := sender.messages[1].messageID
+	statusMessageID := sender.messages[0].messageID
 
 	late := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
 		Thread:                thread,
@@ -705,42 +716,23 @@ func TestLateUserPromptEditsExistingUserPlaceholder(t *testing.T) {
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 5 {
-		t.Fatalf("messages = %#v, want no late appended [User] message", sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want no late appended user message", sender.messages)
 	}
-	foundEdit := false
 	for _, edit := range sender.edits {
-		if edit.messageID == userMessageID && hasHeaderKind(edit.text, "User") && strings.Contains(edit.text, "mtkachenko2") {
-			if strings.Contains(edit.text, "Status:") {
-				t.Fatalf("user placeholder edit text = %q, want no status", edit.text)
-			}
-			foundEdit = true
+		if strings.Contains(edit.text, "mtkachenko2") || hasHeaderKind(edit.text, "User") {
+			t.Fatalf("edits = %#v, want raw user event kept out of the status card", sender.edits)
 		}
-	}
-	if !foundEdit {
-		t.Fatalf("edits = %#v, want user placeholder edited into [User]", sender.edits)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.UserMessageID != userMessageID || panel.LastUserNoticeFP != "user-late-fp" {
-		t.Fatalf("panel = %#v, want same user placeholder id and user fp", panel)
-	}
-	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, userMessageID)
-	if err != nil {
-		t.Fatalf("ResolveMessageRoute failed: %v", err)
-	}
-	if route == nil || route.ThreadID != thread.ID || route.TurnID != "turn-late-user" || route.ItemID != "user-late" {
-		t.Fatalf("user route = %#v, want edited [User] route", route)
+	if panel == nil || panel.SummaryMessageID != statusMessageID || panel.UserMessageID != 0 {
+		t.Fatalf("panel = %#v, want one stable status message", panel)
 	}
 
-	userEditCount := 0
-	for _, edit := range sender.edits {
-		if edit.messageID == userMessageID {
-			userEditCount++
-		}
-	}
+	editCount := len(sender.edits)
 	statusOnly := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
 		Thread:                thread,
 		LatestTurnID:          "turn-late-user",
@@ -757,14 +749,8 @@ func TestLateUserPromptEditsExistingUserPlaceholder(t *testing.T) {
 		t.Fatalf("UpsertSnapshot(statusOnly) failed: %v", err)
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
-	afterStatusUserEditCount := 0
-	for _, edit := range sender.edits {
-		if edit.messageID == userMessageID {
-			afterStatusUserEditCount++
-		}
-	}
-	if afterStatusUserEditCount != userEditCount {
-		t.Fatalf("user edit count after status-only sync = %d, want %d; edits=%#v", afterStatusUserEditCount, userEditCount, sender.edits)
+	if len(sender.edits) != editCount+1 || sender.edits[len(sender.edits)-1].messageID != statusMessageID || !strings.Contains(sender.edits[len(sender.edits)-1].text, "<b>已取消</b>") {
+		t.Fatalf("edits = %#v, want terminal status edited in place", sender.edits)
 	}
 }
 
@@ -801,14 +787,11 @@ func TestTelegramInputSyncDoesNotDuplicateUserRequestNotice(t *testing.T) {
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
 
-	if len(sender.messages) != 4 {
-		t.Fatalf("message count = %d, want New run + trio without [User] duplicate; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one Working card without a user duplicate; messages=%#v", len(sender.messages), sender.messages)
 	}
-	if !strings.Contains(sender.messages[0].text, "New run:") || !strings.Contains(sender.messages[0].text, "Source: Telegram") {
-		t.Fatalf("first message = %q, want Telegram New run notice", sender.messages[0].text)
-	}
-	if strings.Contains(sender.messages[0].text, "Status:") {
-		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
+	if !strings.Contains(sender.messages[0].text, "<b>处理中</b>") {
+		t.Fatalf("message = %q, want Working card", sender.messages[0].text)
 	}
 	for _, message := range sender.messages {
 		if hasHeaderKind(message.text, "User") {
@@ -819,8 +802,8 @@ func TestTelegramInputSyncDoesNotDuplicateUserRequestNotice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.SourceMode != model.PanelSourceTelegramInput || panel.RunNoticeMessageID != sender.messages[0].messageID || panel.LastUserNoticeFP != "" {
-		t.Fatalf("panel = %#v, want telegram_input with empty user notice fp", panel)
+	if panel == nil || panel.SourceMode != model.PanelSourceTelegramInput || panel.SummaryMessageID != sender.messages[0].messageID || panel.RunNoticeMessageID != 0 || panel.LastUserNoticeFP != "" {
+		t.Fatalf("panel = %#v, want telegram_input with one summary card", panel)
 	}
 }
 
@@ -856,8 +839,8 @@ func TestGlobalObserverDoesNotRecreateTelegramOriginPanelOnEditFailure(t *testin
 
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
-	if len(sender.messages) != 4 {
-		t.Fatalf("initial message count = %d, want New run + trio; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("initial message count = %d, want one Working card; messages=%#v", len(sender.messages), sender.messages)
 	}
 	panelBefore, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
@@ -881,8 +864,8 @@ func TestGlobalObserverDoesNotRecreateTelegramOriginPanelOnEditFailure(t *testin
 	sender.editErr = errors.New("forced edit failure")
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 4 {
-		t.Fatalf("message count after global sync = %d, want no duplicate New run/trio; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count after global sync = %d, want no duplicate status card; messages=%#v", len(sender.messages), sender.messages)
 	}
 	panelAfter, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
@@ -1014,22 +997,25 @@ func TestTelegramInputSyncAdoptsObserverPanelForSameTurn(t *testing.T) {
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
 
-	if len(finalMessages(sender.messages)) != 1 {
-		t.Fatalf("messages = %#v, want one new Final message without replacement trio", sender.messages)
+	if len(sender.messages) != 1 || len(sender.edits) != 1 {
+		t.Fatalf("messages=%#v edits=%#v, want one in-place Final edit and one terminal notice", sender.messages, sender.edits)
 	}
-	final := lastFinalMessage(t, sender.messages)
-	if final.options.Silent {
-		t.Fatalf("final = %#v, want audible Final message", final)
+	if sender.messages[0].options.Silent || !strings.Contains(sender.messages[0].text, "<b>Telegram race</b> 已完成") {
+		t.Fatalf("terminal notice=%#v, want audible completion", sender.messages[0])
 	}
-	if len(sender.deletes) != 3 || sender.deletes[0].messageID != 101 || sender.deletes[1].messageID != 102 || sender.deletes[2].messageID != 103 {
-		t.Fatalf("deletes = %#v, want old commentary/tool/output messages deleted", sender.deletes)
+	final := sender.edits[0]
+	if final.messageID != 101 || !hasHeaderKind(final.text, "Final") {
+		t.Fatalf("final = %#v, want Final on observer message 101", final)
+	}
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.SummaryMessageID != final.messageID || panel.SourceMode != model.PanelSourceTelegramInput || panel.LastFinalNoticeFP != "final-telegram-race-fp" {
-		t.Fatalf("panel = %#v, want adopted panel routed to new final id %d with final fp", panel, final.messageID)
+	if panel == nil || panel.SummaryMessageID != 101 || panel.SourceMode != model.PanelSourceTelegramInput || panel.LastFinalNoticeFP != "final-telegram-race-fp" {
+		t.Fatalf("panel = %#v, want adopted panel retained at message 101 with final fp", panel)
 	}
 }
 
@@ -1175,15 +1161,15 @@ func TestSyncThreadPanelToTargetCreatesPanelForRecentTerminalGlobalObserverChang
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "global_observer")
 
-	if len(sender.messages) != 4 {
-		t.Fatalf("message count = %d, want 3 live trio messages plus Final for recent terminal observer change; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one Final card for recent terminal observer change; messages=%#v", len(sender.messages), sender.messages)
 	}
 	final := lastFinalMessage(t, sender.messages)
 	if final.options.Silent {
 		t.Fatalf("final = %#v, want audible Final message", final)
 	}
-	if len(sender.deletes) != 3 {
-		t.Fatalf("deletes = %#v, want commentary/tool/output delete after final", sender.deletes)
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no synthetic working-card cleanup", sender.deletes)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
@@ -1231,13 +1217,10 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
-	if len(sender.messages) != 5 {
-		t.Fatalf("initial messages = %#v, want New run + [User] + trio", sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("initial messages = %#v, want one terminal status card", sender.messages)
 	}
-	runNoticeID := sender.messages[0].messageID
-	summaryID := sender.messages[2].messageID
-	toolID := sender.messages[3].messageID
-	outputID := sender.messages[4].messageID
+	summaryID := sender.messages[0].messageID
 
 	finalSnapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
 		Thread:                thread,
@@ -1260,18 +1243,15 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.deletes) != 4 {
-		t.Fatalf("deletes = %#v, want commentary + New run + tool + output", sender.deletes)
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
 	}
-	wantDeletes := []int64{summaryID, runNoticeID, toolID, outputID}
-	for index, want := range wantDeletes {
-		if sender.deletes[index].messageID != want {
-			t.Fatalf("delete[%d] = %d, want %d; deletes=%#v", index, sender.deletes[index].messageID, want, sender.deletes)
-		}
+	if len(sender.edits) != 1 {
+		t.Fatalf("edits = %#v, want one in-place Final edit", sender.edits)
 	}
-	finalEdit := lastFinalMessage(t, sender.messages)
-	if finalEdit.options.Silent {
-		t.Fatalf("final message = %#v, want audible Final", finalEdit)
+	finalEdit := sender.edits[0]
+	if finalEdit.messageID != summaryID || !hasHeaderKind(finalEdit.text, "Final") {
+		t.Fatalf("final edit = %#v, want Final on message %d", finalEdit, summaryID)
 	}
 	if strings.Contains(finalEdit.text, "[commentary]") || strings.Contains(finalEdit.text, "Completed commentary should stay in Details.") {
 		t.Fatalf("final edit = %q, want final answer only", finalEdit.text)
@@ -1280,7 +1260,7 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.LastFinalNoticeFP != "final-terminal-run-notice-fp" {
+	if panel == nil || panel.LastFinalNoticeFP != "final-terminal-run-notice-fp" || panel.SummaryMessageID != summaryID {
 		t.Fatalf("panel = %#v, want final fingerprint recorded", panel)
 	}
 }
@@ -1512,7 +1492,7 @@ func TestRenderToolPanelKeepsForeignRunningToolHidden(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom(t *testing.T) {
+func TestRenderSummaryPanelShowsActiveRunElapsedTimeInHeader(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -1534,14 +1514,11 @@ func TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom(t *testing.T) {
 	}
 	text := messages[0].Text
 
-	if !strings.Contains(text, "No agent messages yet.") {
-		t.Fatalf("rendered summary = %q, want empty commentary state", text)
+	if !strings.Contains(text, "<b>处理中</b>") || !strings.Contains(text, "正在处理请求 · 30s") {
+		t.Fatalf("rendered summary = %q, want stable Working status with elapsed time", text)
 	}
-	if !strings.Contains(text, "Run active for: 30s") {
-		t.Fatalf("rendered summary = %q, want active run elapsed time", text)
-	}
-	if !strings.HasSuffix(strings.TrimSpace(text), "Run active for: 30s") {
-		t.Fatalf("rendered summary = %q, want run timing footer", text)
+	if strings.Contains(text, "No agent messages yet.") || strings.Contains(text, "Run active for:") {
+		t.Fatalf("rendered summary = %q, want product copy instead of implementation state", text)
 	}
 }
 
@@ -1809,7 +1786,7 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 		t.Fatalf("final card = %#v, want audible Final", finalCard)
 	}
 	cardMessageID := finalCard.messageID
-	detailsToken := buttonToken(finalCard.buttons, "Details")
+	detailsToken := buttonToken(finalCard.buttons, "📋 详情")
 	if detailsToken == "" {
 		t.Fatalf("final card buttons = %#v, want Details", finalCard.buttons)
 	}
@@ -1837,7 +1814,7 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 		t.Fatalf("next details text = %q, want fifth commentary", next.text)
 	}
 
-	toolOnToken := buttonToken(details.buttons, "Tool on")
+	toolOnToken := buttonToken(details.buttons, "显示工具")
 	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, toolOnToken); err != nil {
 		t.Fatalf("HandleCallback(tool on) failed: %v", err)
 	}
@@ -1855,7 +1832,7 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 		t.Fatalf("tool next text = %q, want exactly next commentary without skipping", toolNext.text)
 	}
 
-	fileToken := buttonToken(toolMode.buttons, "Tools file")
+	fileToken := buttonToken(toolMode.buttons, "工具记录")
 	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, fileToken); err != nil {
 		t.Fatalf("HandleCallback(tools file) failed: %v", err)
 	}
@@ -1872,7 +1849,7 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 		t.Fatalf("tools file data = %q, want details tool content", string(sender.documents[0].data))
 	}
 
-	backToken := buttonToken(toolMode.buttons, "Back")
+	backToken := buttonToken(toolMode.buttons, "返回")
 	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, backToken); err != nil {
 		t.Fatalf("HandleCallback(back) failed: %v", err)
 	}
@@ -1927,7 +1904,7 @@ func TestFinalCardDetailsShowsToolOnlyTurnWithoutCommentary(t *testing.T) {
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "explicit")
 	finalCard := lastFinalMessage(t, sender.messages)
 	cardMessageID := finalCard.messageID
-	detailsToken := buttonToken(finalCard.buttons, "Details")
+	detailsToken := buttonToken(finalCard.buttons, "📋 详情")
 	if detailsToken == "" {
 		t.Fatalf("final card buttons = %#v, want Details", finalCard.buttons)
 	}
@@ -1943,7 +1920,7 @@ func TestFinalCardDetailsShowsToolOnlyTurnWithoutCommentary(t *testing.T) {
 		t.Fatalf("details text = %q, want tool-only section instead of no commentary", details.text)
 	}
 
-	toolOnToken := buttonToken(details.buttons, "Tool on")
+	toolOnToken := buttonToken(details.buttons, "显示工具")
 	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, toolOnToken); err != nil {
 		t.Fatalf("HandleCallback(tool on) failed: %v", err)
 	}
@@ -1952,7 +1929,7 @@ func TestFinalCardDetailsShowsToolOnlyTurnWithoutCommentary(t *testing.T) {
 		t.Fatalf("tool mode text = %q, want orphan tool in tool mode", toolMode.text)
 	}
 
-	fileToken := buttonToken(toolMode.buttons, "Tools file")
+	fileToken := buttonToken(toolMode.buttons, "工具记录")
 	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, fileToken); err != nil {
 		t.Fatalf("HandleCallback(tools file) failed: %v", err)
 	}
@@ -2062,7 +2039,7 @@ func TestDetailsCallbacksStayBoundToOriginalPanelAfterNewerRunCompletes(t *testi
 		t.Fatalf("details text = %q, want old turn details only", details.text)
 	}
 
-	backToken := buttonToken(details.buttons, "Back")
+	backToken := buttonToken(details.buttons, "返回")
 	if backToken == "" {
 		t.Fatalf("details buttons = %#v, want Back", details.buttons)
 	}
@@ -2114,7 +2091,7 @@ func TestDetailsCallbackWithoutPanelIDDoesNotFallbackToCurrentPanel(t *testing.T
 	if len(sender.edits) != 0 {
 		t.Fatalf("edits = %#v, want no edit for missing panel_id", sender.edits)
 	}
-	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+	if response == nil || !strings.Contains(response.Text, "详情卡片已失效") {
 		t.Fatalf("response = %#v, want stale details response", response)
 	}
 }
@@ -2133,7 +2110,7 @@ func TestDetailsCallbackRejectsMismatchedMessageID(t *testing.T) {
 	if len(sender.edits) != 0 {
 		t.Fatalf("edits = %#v, want no edit for mismatched details message", sender.edits)
 	}
-	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+	if response == nil || !strings.Contains(response.Text, "详情卡片已失效") {
 		t.Fatalf("response = %#v, want stale details response", response)
 	}
 }
@@ -2188,7 +2165,7 @@ func TestTurnOffPlanCallbackSetsDefaultOverrideAndEditsFinalCard(t *testing.T) {
 		t.Fatalf("CreateThreadPanel failed: %v", err)
 	}
 	_, buttons, _ := service.renderFinalCard(ctx, panel.ID, thread, &snapshot)
-	token := buttonToken(buttons, "Turn off Plan")
+	token := buttonToken(buttons, "退出 Plan")
 	if token == "" {
 		t.Fatalf("final buttons = %#v, want Turn off Plan", buttons)
 	}
@@ -2210,7 +2187,7 @@ func TestTurnOffPlanCallbackSetsDefaultOverrideAndEditsFinalCard(t *testing.T) {
 	if edit.messageID != panel.SummaryMessageID {
 		t.Fatalf("edit message id = %d, want %d", edit.messageID, panel.SummaryMessageID)
 	}
-	if buttonToken(edit.buttons, "Turn off Plan") != "" {
+	if buttonToken(edit.buttons, "退出 Plan") != "" {
 		t.Fatalf("edited buttons = %#v, want Turn off Plan removed", edit.buttons)
 	}
 }
@@ -2265,7 +2242,7 @@ func TestTurnOffPlanCallbackRejectsMismatchedMessageID(t *testing.T) {
 		t.Fatalf("CreateThreadPanel failed: %v", err)
 	}
 	_, buttons, _ := service.renderFinalCard(ctx, panel.ID, thread, &snapshot)
-	token := buttonToken(buttons, "Turn off Plan")
+	token := buttonToken(buttons, "退出 Plan")
 	if token == "" {
 		t.Fatalf("final buttons = %#v, want Turn off Plan", buttons)
 	}
@@ -2280,7 +2257,7 @@ func TestTurnOffPlanCallbackRejectsMismatchedMessageID(t *testing.T) {
 	if got := service.threadCollaborationOverride(ctx, thread.ID); got != "" {
 		t.Fatalf("threadCollaborationOverride = %q, want unchanged", got)
 	}
-	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+	if response == nil || !strings.Contains(response.Text, "详情卡片已失效") {
 		t.Fatalf("response = %#v, want stale response", response)
 	}
 }
@@ -2338,7 +2315,7 @@ func TestTurnOffPlanCallbackRejectsMismatchedPanelRoute(t *testing.T) {
 			if err != nil {
 				t.Fatalf("HandleCallback(turn_off_plan stale) failed: %v", err)
 			}
-			if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+			if response == nil || !strings.Contains(response.Text, "详情卡片已失效") {
 				t.Fatalf("response = %#v, want stale response", response)
 			}
 			if got := service.threadCollaborationOverride(ctx, thread.ID); got != "" {
@@ -2365,7 +2342,7 @@ func TestDetailsToolsFileRejectsMismatchedPanelRoute(t *testing.T) {
 	if len(sender.documents) != 0 {
 		t.Fatalf("documents = %#v, want no export for mismatched details route", sender.documents)
 	}
-	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+	if response == nil || !strings.Contains(response.Text, "详情卡片已失效") {
 		t.Fatalf("response = %#v, want stale details response", response)
 	}
 }
@@ -2513,15 +2490,18 @@ func TestTerminalSyncAdoptsActivePanelWithoutTurnID(t *testing.T) {
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "global_observer")
 
-	if len(finalMessages(sender.messages)) != 1 {
-		t.Fatalf("messages = %#v, want one new Final message without new trio when active panel adopts turn", sender.messages)
+	if len(sender.messages) != 1 || len(sender.edits) != 1 {
+		t.Fatalf("messages=%#v edits=%#v, want one in-place Final edit and one terminal notice", sender.messages, sender.edits)
 	}
-	final := lastFinalMessage(t, sender.messages)
-	if final.options.Silent {
-		t.Fatalf("final = %#v, want audible Final message", final)
+	if sender.messages[0].options.Silent || !strings.Contains(sender.messages[0].text, "<b>Adopt turn</b> 已完成") {
+		t.Fatalf("terminal notice=%#v, want audible completion", sender.messages[0])
 	}
-	if len(sender.deletes) != 3 || sender.deletes[0].messageID != 101 || sender.deletes[1].messageID != 102 || sender.deletes[2].messageID != 103 {
-		t.Fatalf("deletes = %#v, want existing commentary/tool/output delete", sender.deletes)
+	final := sender.edits[0]
+	if final.messageID != 101 || !hasHeaderKind(final.text, "Final") {
+		t.Fatalf("final = %#v, want Final on message 101", final)
+	}
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
 	}
 }
 
@@ -2572,38 +2552,29 @@ func TestSyncThreadPanelCreatesRouteablePlanPromptAndDedupes(t *testing.T) {
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 6 {
-		t.Fatalf("message count = %d, want New run + [User placeholder] + [Plan] + trio once: %#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one Needs input card across repeated sync: %#v", len(sender.messages), sender.messages)
 	}
-	if !strings.Contains(sender.messages[0].text, "New run:") {
-		t.Fatalf("first message = %q, want New run before [User]/[Plan]", sender.messages[0].text)
+	if !hasHeaderKind(sender.messages[0].text, "Plan") {
+		t.Fatalf("message = %q, want Needs input card", sender.messages[0].text)
 	}
-	if !hasHeaderKind(sender.messages[1].text, "User") || !strings.Contains(sender.messages[1].text, "User prompt was not available") {
-		t.Fatalf("second message = %q, want [User] placeholder before [Plan]", sender.messages[1].text)
+	if !strings.Contains(sender.messages[0].text, "Choose next step?") {
+		t.Fatalf("plan prompt text = %q, want question", sender.messages[0].text)
 	}
-	if !hasHeaderKind(sender.messages[2].text, "Plan") {
-		t.Fatalf("third message = %q, want [Plan] prompt before trio", sender.messages[2].text)
-	}
-	if !strings.Contains(sender.messages[2].text, "Choose next step?") {
-		t.Fatalf("plan prompt text = %q, want question", sender.messages[2].text)
-	}
-	if got := buttonToken(sender.messages[2].buttons, "Continue"); got == "" {
-		t.Fatalf("plan prompt buttons = %#v, want structured Continue button", sender.messages[2].buttons)
+	if got := buttonToken(sender.messages[0].buttons, "Continue"); got == "" {
+		t.Fatalf("plan prompt buttons = %#v, want structured Continue button", sender.messages[0].buttons)
 	}
 	if sender.messages[0].options.Silent {
-		t.Fatalf("New run options = %#v, want audible when notify_new_run is enabled", sender.messages[0].options)
-	}
-	if !sender.messages[1].options.Silent || sender.messages[2].options.Silent || !sender.messages[3].options.Silent || !sender.messages[4].options.Silent || !sender.messages[5].options.Silent {
-		t.Fatalf("message options = %#v, want only New run and [Plan] audible", sender.messages)
+		t.Fatalf("message options = %#v, want Needs input audible", sender.messages[0].options)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.UserMessageID != sender.messages[1].messageID || panel.PlanPromptMessageID != sender.messages[2].messageID || panel.LastPlanPromptFP != "plan-fp-1" {
-		t.Fatalf("panel plan prompt state = %#v, want user id %d and plan id %d / plan-fp-1", panel, sender.messages[1].messageID, sender.messages[2].messageID)
+	if panel == nil || panel.UserMessageID != 0 || panel.PlanPromptMessageID != sender.messages[0].messageID || panel.LastPlanPromptFP != "plan-fp-1" {
+		t.Fatalf("panel plan prompt state = %#v, want plan on summary id %d / plan-fp-1", panel, sender.messages[0].messageID)
 	}
-	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, sender.messages[2].messageID)
+	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, sender.messages[0].messageID)
 	if err != nil {
 		t.Fatalf("ResolveMessageRoute failed: %v", err)
 	}
@@ -2656,13 +2627,13 @@ func TestSyncThreadPanelCreatesServerRequestPlanPromptRoute(t *testing.T) {
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 6 {
-		t.Fatalf("message count = %d, want New run + [User placeholder] + [Plan] + trio: %#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one Needs input card: %#v", len(sender.messages), sender.messages)
 	}
-	if got := buttonToken(sender.messages[2].buttons, "staging"); got == "" {
-		t.Fatalf("plan prompt buttons = %#v, want staging button", sender.messages[2].buttons)
+	if got := buttonToken(sender.messages[0].buttons, "staging"); got == "" {
+		t.Fatalf("plan prompt buttons = %#v, want staging button", sender.messages[0].buttons)
 	}
-	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, sender.messages[2].messageID)
+	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, sender.messages[0].messageID)
 	if err != nil {
 		t.Fatalf("ResolveMessageRoute failed: %v", err)
 	}
@@ -2702,11 +2673,8 @@ func TestRunNoticeNotificationFlagCanSilenceNewRun(t *testing.T) {
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.messages) != 5 {
-		t.Fatalf("messages = %#v, want New run + [User placeholder] + trio", sender.messages)
-	}
-	if !strings.Contains(sender.messages[0].text, "New run:") {
-		t.Fatalf("first message = %q, want New run", sender.messages[0].text)
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0].text, "<b>处理中</b>") {
+		t.Fatalf("messages = %#v, want one Working card", sender.messages)
 	}
 	for index, message := range sender.messages {
 		if !message.options.Silent {
@@ -2765,7 +2733,7 @@ func setupTurnOffPlanCallback(t *testing.T, suffix string) (*Service, *recording
 		t.Fatalf("CreateThreadPanel failed: %v", err)
 	}
 	_, buttons, _ := service.renderFinalCard(ctx, panel.ID, thread, &snapshot)
-	token := buttonToken(buttons, "Turn off Plan")
+	token := buttonToken(buttons, "退出 Plan")
 	if token == "" {
 		t.Fatalf("final buttons = %#v, want Turn off Plan", buttons)
 	}

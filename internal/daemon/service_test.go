@@ -13,11 +13,45 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
 	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/control"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
+
+func TestHandleMessageWithLocalImageStartsRichTurn(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "thread-image-input", Title: "Image input", ProjectName: "Codex", CWD: `C:\project`, Status: "idle", UpdatedAt: time.Now().UTC().Unix()}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.HandleMessageWithLocalImages(ctx, 123456789, 0, 123456789, "看一下错误截图", []string{`C:\runtime\telegram-photo.jpg`}, 0)
+	if err != nil {
+		t.Fatalf("HandleMessageWithLocalImages failed: %v", err)
+	}
+	if response == nil || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want started turn", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one rich turn", stub.turnStartCalls)
+	}
+	inputs := stub.turnStartCalls[0].inputs
+	if len(inputs) != 2 || inputs[0].Type != "text" || inputs[0].Text != "看一下错误截图" || inputs[1].Type != "localImage" || inputs[1].Path != `C:\runtime\telegram-photo.jpg` {
+		t.Fatalf("inputs = %#v, want caption + local image", inputs)
+	}
+}
 
 func TestResolveRoutePrecedenceExplicitThenReplyThenBinding(t *testing.T) {
 	t.Parallel()
@@ -350,6 +384,11 @@ func TestThreadsCommandHidesInternalSubAgentThreads(t *testing.T) {
 	if err := service.store.UpsertThread(ctx, internal); err != nil {
 		t.Fatalf("UpsertThread(internal) failed: %v", err)
 	}
+	service.live = &stubSession{threadListResult: map[string]any{"data": []any{
+		map[string]any{"id": visible.ID, "title": visible.Title, "cwd": `C:\work\codex-tg`, "updatedAt": visible.UpdatedAt, "preview": visible.LastPreview},
+		map[string]any{"id": internal.ID, "title": internal.Title, "ephemeral": true, "source": map[string]any{"subAgent": "memory_consolidation"}},
+	}}}
+	service.liveConnected = true
 
 	response, err := service.handleCommand(ctx, 123456789, 0, "/threads 8", 0)
 	if err != nil {
@@ -358,14 +397,105 @@ func TestThreadsCommandHidesInternalSubAgentThreads(t *testing.T) {
 	if response == nil {
 		t.Fatal("handleCommand(/threads) returned nil response")
 	}
-	if !strings.Contains(response.Text, "Visible work") {
-		t.Fatalf("/threads text missing visible thread:\n%s", response.Text)
+	if response.Text != "可用会话\n点击标题打开。" {
+		t.Fatalf("/threads text = %q, want compact Chinese guidance", response.Text)
 	}
 	if strings.Contains(response.Text, "memories") || strings.Contains(response.Text, internal.ID) {
 		t.Fatalf("/threads text contains internal thread:\n%s", response.Text)
 	}
-	if len(response.Buttons) != 1 || len(response.Buttons[0]) != 1 || response.Buttons[0][0].Text != "Open 1" {
-		t.Fatalf("/threads buttons = %#v, want one Open 1 button", response.Buttons)
+	if len(response.Buttons) != 1 || len(response.Buttons[0]) != 1 || response.Buttons[0][0].Text != "Visible work" {
+		t.Fatalf("/threads buttons = %#v, want the thread title itself as the button", response.Buttons)
+	}
+}
+
+func TestThreadsCommandUsesPreviewForPlaceholderTitleAndUnicodeSafeButtons(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	threadID := "01a03706-f6bb-7a33-a119-18f908e5d1ce"
+	preview := "排查 codex-tg 组件并确认一个非常非常长的中文会话标题不会在按钮裁剪时破坏 UTF-8 字符边界以及 Telegram 显示"
+	if err := service.store.UpsertThread(ctx, model.Thread{
+		ID:          threadID,
+		Title:       threadID,
+		ProjectName: "Codex",
+		UpdatedAt:   10,
+		LastPreview: preview,
+	}); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	service.live = &stubSession{threadListResult: map[string]any{"data": []any{
+		map[string]any{"id": threadID, "title": threadID, "updatedAt": int64(10), "preview": preview},
+	}}}
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/threads", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/threads) failed: %v", err)
+	}
+	if response == nil || len(response.Buttons) != 1 || len(response.Buttons[0]) != 1 {
+		t.Fatalf("response = %#v, want one title button", response)
+	}
+	label := response.Buttons[0][0].Text
+	if !strings.HasPrefix(label, "排查 codex-tg 组件") || !strings.HasSuffix(label, "...") {
+		t.Fatalf("button label = %q, want preview-derived truncated title", label)
+	}
+	if !utf8.ValidString(label) {
+		t.Fatalf("button label is invalid UTF-8: %q", label)
+	}
+	if strings.Contains(label, "Open") || strings.Contains(response.Text, threadID) || strings.Contains(response.Text, "Codex") {
+		t.Fatalf("response leaked old debug list UI: text=%q label=%q", response.Text, label)
+	}
+}
+
+func TestThreadsCommandDoesNotExposeCachedThreadsMissingFromCurrentRuntime(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stale := model.Thread{ID: "stale-desktop-thread", Title: "旧 Desktop 会话", UpdatedAt: 10, Status: "notLoaded"}
+	if err := service.store.UpsertThread(ctx, stale); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	service.live = &stubSession{threadListResult: map[string]any{"data": []any{}}}
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/threads", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/threads) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "暂无可用会话") || len(response.Buttons) != 0 {
+		t.Fatalf("response = %#v, want no available runtime threads", response)
+	}
+	if strings.Contains(response.Text, stale.Title) || strings.Contains(response.Text, stale.ID) {
+		t.Fatalf("response leaked stale cached thread: %#v", response)
+	}
+}
+
+func TestShowThreadRejectsCachedThreadMissingFromCurrentRuntime(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	stale := model.Thread{ID: "stale-desktop-thread", Title: "旧 Desktop 会话", UpdatedAt: 10, Status: "completed"}
+	storeForegroundTestSnapshot(t, service, stale, appserver.ThreadReadSnapshot{
+		Thread: stale, LatestTurnID: "stale-turn", LatestTurnStatus: "completed",
+		LatestFinalFP: "stale-final-fp", LatestFinalText: "这是旧缓存结果。",
+	}, time.Date(2026, time.August, 25, 16, 0, 0, 0, time.UTC))
+	service.live = &stubSession{threadReadErr: errors.New("thread not loaded")}
+	service.liveConnected = true
+
+	response, err := service.showThread(ctx, 123456789, 0, stale.ID, true)
+	if err != nil {
+		t.Fatalf("showThread failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "不属于当前 Telegram runtime") || response.ThreadID != "" {
+		t.Fatalf("response = %#v, want unavailable-runtime guidance", response)
+	}
+	if len(sender.messages) != 0 || len(sender.edits) != 0 {
+		t.Fatalf("stale cached card was rendered: messages=%#v edits=%#v", sender.messages, sender.edits)
 	}
 }
 
@@ -714,7 +844,6 @@ func TestProjectOpenShowsNewThreadMenu(t *testing.T) {
 	if err := service.store.UpsertThread(ctx, thread); err != nil {
 		t.Fatalf("UpsertThread failed: %v", err)
 	}
-
 	projects, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
 	if err != nil {
 		t.Fatalf("handleCommand(/projects) failed: %v", err)
@@ -787,7 +916,7 @@ func TestProjectNewThreadArmsThenPlainTextCreatesThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleCallback(New thread) failed: %v", err)
 	}
-	if armed == nil || !strings.Contains(armed.Text, "Send the first prompt") {
+	if armed == nil || !strings.Contains(armed.Text, "请发送首条 prompt") {
 		t.Fatalf("armed response = %#v, want prompt instruction", armed)
 	}
 
@@ -845,7 +974,7 @@ func TestProjectNewThreadRejectsThreadStartWithoutID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handlePlainText failed: %v", err)
 	}
-	if response == nil || !strings.Contains(response.Text, "could not create thread") {
+	if response == nil || !strings.Contains(response.Text, "没有返回会话 ID") {
 		t.Fatalf("response = %#v, want missing thread id error", response)
 	}
 	if len(stub.turnStartCalls) != 0 {
@@ -979,6 +1108,84 @@ func TestNewChatCommandCreatesCodexUIChatCWDAndBinds(t *testing.T) {
 	}
 }
 
+func TestNewChatCommandWithoutPromptCollectsTitleThenPrompt(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	chatRoot := t.TempDir()
+	fixedNow := time.Date(2026, 8, 25, 14, 32, 5, 0, time.Local)
+	service.cfg.CodexChatsRoot = chatRoot
+	service.now = func() time.Time { return fixedNow }
+	expectedCWD := filepath.Join(chatRoot, "2026-08-25", "image-review")
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "armed-new-chat", "title": "New chat"}},
+		threadReads: map[string]map[string]any{
+			"armed-new-chat": {
+				"thread": map[string]any{
+					"id":     "armed-new-chat",
+					"title":  "New chat",
+					"cwd":    expectedCWD,
+					"status": "active",
+					"turns": []any{map[string]any{
+						"id":     "armed-turn",
+						"status": "inProgress",
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "inspect image flow"}}}},
+					}},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	armed, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	if armed == nil || !strings.Contains(armed.Text, "标题") || !strings.Contains(armed.Text, "/cancel") {
+		t.Fatalf("armed response = %#v, want title and /cancel guidance", armed)
+	}
+	if len(stub.threadStartCalls) != 0 {
+		t.Fatalf("threadStartCalls = %#v, want no thread before title and prompt", stub.threadStartCalls)
+	}
+
+	titleResponse, err := service.handlePlainText(ctx, 123456789, 0, "Image review", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText(title) failed: %v", err)
+	}
+	if titleResponse == nil || !strings.Contains(titleResponse.Text, "Image review") || !strings.Contains(titleResponse.Text, "prompt") {
+		t.Fatalf("title response = %#v, want accepted title and prompt guidance", titleResponse)
+	}
+	if len(stub.threadStartCalls) != 0 {
+		t.Fatalf("threadStartCalls = %#v, want no thread until prompt is supplied", stub.threadStartCalls)
+	}
+
+	response, err := service.handlePlainText(ctx, 123456789, 0, "inspect image flow", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText(prompt) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "armed-new-chat" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want armed new Chat thread/turn", response)
+	}
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != expectedCWD {
+		t.Fatalf("threadStartCalls = %#v, want generated Chat cwd %q", stub.threadStartCalls, expectedCWD)
+	}
+	if len(stub.turnStartCalls) != 1 || stub.turnStartCalls[0].message != "inspect image flow" {
+		t.Fatalf("turnStartCalls = %#v, want separately collected prompt", stub.turnStartCalls)
+	}
+	if len(stub.threadSetNameCalls) != 1 || stub.threadSetNameCalls[0].threadID != "armed-new-chat" || stub.threadSetNameCalls[0].name != "Image review" {
+		t.Fatalf("threadSetNameCalls = %#v, want explicit title synced to App Server", stub.threadSetNameCalls)
+	}
+	thread, err := service.store.GetThread(ctx, "armed-new-chat")
+	if err != nil || thread == nil || thread.Title != "Image review" {
+		t.Fatalf("stored thread = %#v err=%v, want explicit title", thread, err)
+	}
+	if _, ok, _, err := service.pendingNewThreadState(ctx, 123456789, 0); err != nil || ok {
+		t.Fatalf("pending state after consume: ok=%v err=%v, want cleared", ok, err)
+	}
+}
+
 func TestNewChatCWDUsesFallbackSlugAndCollisionSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -1061,6 +1268,203 @@ func TestNewThreadCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
 	}
 }
 
+func TestNewThreadCommandWithoutPromptCollectsTitleThenPrompt(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "armed-new-thread", "title": "New thread"}},
+		threadReads: map[string]map[string]any{
+			"armed-new-thread": {
+				"thread": map[string]any{
+					"id":     "armed-new-thread",
+					"title":  "New thread",
+					"status": "active",
+					"turns": []any{map[string]any{
+						"id":     "armed-turn",
+						"status": "inProgress",
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "scratch later"}}}},
+					}},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	armed, err := service.handleCommand(ctx, 123456789, 7, "/newthread", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newthread) failed: %v", err)
+	}
+	if armed == nil || !strings.Contains(armed.Text, "标题") || !strings.Contains(armed.Text, "/cancel") {
+		t.Fatalf("armed response = %#v, want title and /cancel guidance", armed)
+	}
+	titleResponse, err := service.handlePlainText(ctx, 123456789, 7, "Scratch investigation", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText(title) failed: %v", err)
+	}
+	if titleResponse == nil || !strings.Contains(titleResponse.Text, "Scratch investigation") || !strings.Contains(titleResponse.Text, "prompt") {
+		t.Fatalf("title response = %#v, want accepted title and prompt guidance", titleResponse)
+	}
+	if len(stub.threadStartCalls) != 0 {
+		t.Fatalf("threadStartCalls = %#v, want no thread until prompt is supplied", stub.threadStartCalls)
+	}
+	response, err := service.handlePlainText(ctx, 123456789, 7, "scratch later", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText(prompt) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "armed-new-thread" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want armed no-cwd thread/turn", response)
+	}
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != "" {
+		t.Fatalf("threadStartCalls = %#v, want no Telegram-selected cwd", stub.threadStartCalls)
+	}
+	if len(stub.turnStartCalls) != 1 || stub.turnStartCalls[0].message != "scratch later" {
+		t.Fatalf("turnStartCalls = %#v, want separately collected prompt", stub.turnStartCalls)
+	}
+	if len(stub.threadSetNameCalls) != 1 || stub.threadSetNameCalls[0].name != "Scratch investigation" {
+		t.Fatalf("threadSetNameCalls = %#v, want explicit title synced to App Server", stub.threadSetNameCalls)
+	}
+}
+
+func TestCancelClearsPendingNewChatOrNewThreadPrompt(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+
+	if _, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0); err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	cancelled, err := service.handleCommand(ctx, 123456789, 0, "/cancel", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/cancel) failed: %v", err)
+	}
+	if cancelled == nil || !strings.Contains(cancelled.Text, "Chat") || !strings.Contains(cancelled.Text, "取消") {
+		t.Fatalf("cancelled response = %#v, want Chat cancellation", cancelled)
+	}
+	if _, ok, _, err := service.pendingNewThreadState(ctx, 123456789, 0); err != nil || ok {
+		t.Fatalf("pending state after /cancel: ok=%v err=%v, want cleared", ok, err)
+	}
+
+	if _, err := service.handleCommand(ctx, 123456789, 7, "/newthread", 0); err != nil {
+		t.Fatalf("handleCommand(/newthread) failed: %v", err)
+	}
+	cancelled, err = service.handleCommand(ctx, 123456789, 7, "/cancel", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/cancel) failed: %v", err)
+	}
+	if cancelled == nil || !strings.Contains(cancelled.Text, "会话") || !strings.Contains(cancelled.Text, "取消") {
+		t.Fatalf("cancelled response = %#v, want Thread cancellation", cancelled)
+	}
+
+	nothing, err := service.handleCommand(ctx, 123456789, 7, "/cancel", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(second /cancel) failed: %v", err)
+	}
+	if nothing == nil || !strings.Contains(nothing.Text, "没有") {
+		t.Fatalf("second cancel response = %#v, want no-pending guidance", nothing)
+	}
+}
+
+func TestPendingNewChatPromptExpiresAndDoesNotStartThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 25, 14, 32, 5, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	if _, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0); err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	now = now.Add(newThreadStateTTL + time.Second)
+	response, err := service.handlePlainText(ctx, 123456789, 0, "too late", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "超时") || !strings.Contains(response.Text, "/newchat") {
+		t.Fatalf("expired response = %#v, want /newchat timeout guidance", response)
+	}
+	if len(stub.threadStartCalls) != 0 {
+		t.Fatalf("threadStartCalls = %#v, want no thread after expiry", stub.threadStartCalls)
+	}
+}
+
+func TestPendingNewThreadPromptSurvivesServiceRestart(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 25, 14, 32, 5, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	if _, err := service.handleCommand(ctx, 123456789, 9, "/newthread", 0); err != nil {
+		t.Fatalf("handleCommand(/newthread) failed: %v", err)
+	}
+	if response, err := service.handlePlainText(ctx, 123456789, 9, "Restart-safe title", 0); err != nil || response == nil || !strings.Contains(response.Text, "prompt") {
+		t.Fatalf("handlePlainText(title) response=%#v err=%v, want prompt stage", response, err)
+	}
+	cfg := service.cfg
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close before restart failed: %v", err)
+	}
+
+	restarted, err := New(cfg)
+	if err != nil {
+		t.Fatalf("daemon.New after restart failed: %v", err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	restarted.now = func() time.Time { return now.Add(time.Minute) }
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "restart-new-thread", "title": "Restart thread"}},
+	}
+	restarted.live = stub
+	restarted.liveConnected = true
+
+	response, err := restarted.handlePlainText(ctx, 123456789, 9, "continue after restart", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText after restart failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "restart-new-thread" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want persisted pending prompt to create thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 || stub.turnStartCalls[0].message != "continue after restart" {
+		t.Fatalf("turnStartCalls = %#v, want prompt consumed after restart", stub.turnStartCalls)
+	}
+	if len(stub.threadSetNameCalls) != 1 || stub.threadSetNameCalls[0].name != "Restart-safe title" {
+		t.Fatalf("threadSetNameCalls = %#v, want persisted title after restart", stub.threadSetNameCalls)
+	}
+}
+
+func TestInlineNewThreadCommandClearsOlderPendingCreation(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "inline-new-thread", "title": "Inline thread"}},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	if _, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0); err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newthread create immediately", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(inline /newthread) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "inline-new-thread" {
+		t.Fatalf("response = %#v, want inline thread creation", response)
+	}
+	if _, ok, _, err := service.pendingNewThreadState(ctx, 123456789, 0); err != nil || ok {
+		t.Fatalf("pending state after inline create: ok=%v err=%v, want cleared", ok, err)
+	}
+}
+
 func TestNewChatCommandRejectsMissingThreadID(t *testing.T) {
 	t.Parallel()
 
@@ -1075,7 +1479,7 @@ func TestNewChatCommandRejectsMissingThreadID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleCommand(/newchat) failed: %v", err)
 	}
-	if response == nil || !strings.Contains(response.Text, "could not create thread") {
+	if response == nil || !strings.Contains(response.Text, "没有返回会话 ID") {
 		t.Fatalf("response = %#v, want missing thread id error", response)
 	}
 	if len(stub.turnStartCalls) != 0 {
@@ -1807,7 +2211,7 @@ func TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent(t *t
 	if len(summaryMessages) != 1 {
 		t.Fatalf("len(summaryMessages) = %d, want 1", len(summaryMessages))
 	}
-	if !strings.Contains(summaryMessages[0].Text, "Run active for: 8s") {
+	if !strings.Contains(summaryMessages[0].Text, "正在处理请求 · 8s") {
 		t.Fatalf("rendered summary = %q, want elapsed run time", summaryMessages[0].Text)
 	}
 }
@@ -2041,12 +2445,12 @@ func TestPollTrackedSyncsFirstSeenRecentTerminalCatchup(t *testing.T) {
 
 	service.pollTracked(ctx)
 
-	if len(sender.messages) != 4 {
-		t.Fatalf("message count = %d, want 3 live trio messages plus Final for first-seen terminal catchup; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one Final card for first-seen terminal catchup; messages=%#v", len(sender.messages), sender.messages)
 	}
 	foundFinal := false
 	for _, message := range sender.messages {
-		if hasHeaderKind(message.text, "Final") && strings.Contains(message.text, "[Codex]") && strings.Contains(message.text, "[Catchup terminal]") && strings.Contains(message.text, "CATCHUP_OK") {
+		if hasHeaderKind(message.text, "Final") && strings.Contains(message.text, "<b>Codex</b>") && strings.Contains(message.text, "T:thread") && strings.Contains(message.text, "CATCHUP_OK") {
 			if message.options.Silent {
 				t.Fatalf("final message = %#v, want audible Final", message)
 			}
@@ -2057,8 +2461,8 @@ func TestPollTrackedSyncsFirstSeenRecentTerminalCatchup(t *testing.T) {
 	if !foundFinal {
 		t.Fatalf("final card message not found: %#v", sender.messages)
 	}
-	if len(sender.deletes) != 3 {
-		t.Fatalf("deletes = %#v, want commentary/tool/output cleanup after final", sender.deletes)
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no synthetic status-card cleanup", sender.deletes)
 	}
 }
 
@@ -2592,6 +2996,383 @@ func TestPollTrackedSkipsThreadNotLoadedWithoutRepair(t *testing.T) {
 	requireLogContains(t, got, `"reason":"thread_not_loaded"`)
 	if strings.Contains(got, `"event":"repair_requested"`) {
 		t.Fatalf("unexpected repair_requested log for thread not loaded: %s", got)
+	}
+}
+
+func TestBootstrapTrackedStateResumesBoundThreadByDefault(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "read-only-bound-thread",
+		Title:       "Read only binding",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	live := &stubSession{}
+	poll := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, "turn-complete", "completed"),
+	}}
+	service.live = live
+	service.poll = poll
+	service.liveConnected = true
+	service.pollConnected = true
+
+	service.bootstrapTrackedState(ctx)
+
+	if len(live.threadResumeCalls) != 1 || live.threadResumeCalls[0].threadID != thread.ID {
+		t.Fatalf("bootstrap resume calls = %#v, want bound thread", live.threadResumeCalls)
+	}
+	if !service.ownsLiveThread(thread.ID) {
+		t.Fatal("bound thread was resumed but not recorded as owned")
+	}
+}
+
+func TestBootstrapTrackedStateSkipsManuallyReleasedBoundThread(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "released-bound-thread", Title: "Released", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	if err := service.setTelegramWriterReleased(ctx, thread.ID, true); err != nil {
+		t.Fatalf("setTelegramWriterReleased failed: %v", err)
+	}
+	live := &stubSession{}
+	poll := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, "turn-complete", "completed"),
+	}}
+	service.live = live
+	service.poll = poll
+	service.liveConnected = true
+	service.pollConnected = true
+
+	service.bootstrapTrackedState(ctx)
+
+	if len(live.threadResumeCalls) != 0 {
+		t.Fatalf("bootstrap resumed manually released thread: %#v", live.threadResumeCalls)
+	}
+}
+
+func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "bind-writer-thread", Title: "Bind writer", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.setTelegramWriterReleased(ctx, thread.ID, true); err != nil {
+		t.Fatalf("setTelegramWriterReleased failed: %v", err)
+	}
+	live := &stubSession{}
+	service.live = live
+	service.liveConnected = true
+	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-complete", LatestTurnStatus: "completed"}
+
+	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	bindToken := callbackTokenForButton(buttons, "由 TG 接管")
+	if bindToken == "" {
+		t.Fatalf("Bind here button missing from %#v", buttons)
+	}
+	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, bindToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(bind_here) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "已切换") {
+		t.Fatalf("response = %#v, want bind confirmation", response)
+	}
+	if len(live.threadResumeCalls) != 1 || live.threadResumeCalls[0].threadID != thread.ID {
+		t.Fatalf("bind resume calls = %#v, want target thread", live.threadResumeCalls)
+	}
+	if !service.ownsLiveThread(thread.ID) {
+		t.Fatal("Bind here did not record the acquired writer")
+	}
+	if service.telegramWriterReleased(ctx, thread.ID) {
+		t.Fatal("Bind here did not clear the manual-release marker")
+	}
+	_, ownedButtons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	if callbackTokenForButton(ownedButtons, "释放 TG 控制") == "" {
+		t.Fatalf("Release TG lock button missing from %#v", ownedButtons)
+	}
+	if callbackTokenForButton(ownedButtons, "由 TG 接管") != "" {
+		t.Fatalf("Bind here remained after TG acquired the writer: %#v", ownedButtons)
+	}
+	_, finalButtons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
+	if callbackTokenForButton(finalButtons, "释放 TG 控制") == "" {
+		t.Fatalf("Release TG lock button missing from Final card: %#v", finalButtons)
+	}
+}
+
+func TestBindHereKeepsRouteAndReportsAnotherWriterConflict(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "bind-conflict-thread", Title: "Conflict", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	live := &stubSession{threadResumeErr: errors.New("map[code:-32600 message:thread already has an active writer]")}
+	service.live = live
+	service.liveConnected = true
+
+	response, err := service.bindThreadForTelegram(ctx, 123456789, 0, thread.ID)
+	if err != nil {
+		t.Fatalf("bindThreadForTelegram failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "另一个 Codex 客户端") {
+		t.Fatalf("response = %#v, want writer-conflict guidance", response)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil || binding == nil || binding.ThreadID != thread.ID {
+		t.Fatalf("binding = %#v, err=%v, want route retained", binding, err)
+	}
+	if service.ownsLiveThread(thread.ID) {
+		t.Fatal("writer conflict was incorrectly recorded as owned")
+	}
+}
+
+func TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "callback-release-thread", Title: "Release", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	oldLive := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, "turn-complete", "completed"),
+	}}
+	newLive := &stubSession{}
+	service.live = oldLive
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
+	service.liveFactory = func() Session { return newLive }
+	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-complete", LatestTurnStatus: "completed"}
+	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	releaseToken := callbackTokenForButton(buttons, "释放 TG 控制")
+	if releaseToken == "" {
+		t.Fatalf("Release TG lock button missing from %#v", buttons)
+	}
+
+	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, releaseToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(release_writer) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "已释放") {
+		t.Fatalf("response = %#v, want release callback confirmation", response)
+	}
+	if !service.telegramWriterReleased(ctx, thread.ID) {
+		t.Fatal("release callback did not persist the manual-release marker")
+	}
+	if oldLive.closeCalls != 1 || service.live != newLive || !service.liveConnected {
+		t.Fatalf("live session was not recycled: close=%d live=%p connected=%t", oldLive.closeCalls, service.live, service.liveConnected)
+	}
+	_, releasedButtons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	if callbackTokenForButton(releasedButtons, "由 TG 接管") == "" {
+		t.Fatalf("Bind here button missing after release: %#v", releasedButtons)
+	}
+}
+
+func TestSendInputWriterConflictReturnsDirectResponseWithoutQueue(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "writer-conflict-thread",
+		Title:       "Desktop owned",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	live := &stubSession{threadResumeErr: errors.New("map[code:-32600 message:thread writer-conflict-thread already has an active writer]")}
+	service.live = live
+	service.liveConnected = true
+
+	response, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "do not queue this", "")
+	if err != nil {
+		t.Fatalf("sendInputToThreadTurn failed: %v", err)
+	}
+	if response == nil || !strings.Contains(strings.ToLower(response.Text), "another codex client") || !strings.Contains(strings.ToLower(response.Text), "not queued") {
+		t.Fatalf("response = %#v, want another-client no-queue guidance", response)
+	}
+	if len(live.turnSteerCalls) != 0 || len(live.turnStartCalls) != 0 {
+		t.Fatalf("writer conflict dispatched a turn: steer=%#v start=%#v", live.turnSteerCalls, live.turnStartCalls)
+	}
+}
+
+func TestReleaseTelegramWritersRefusesActiveOwnedThread(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "active-owned-thread", Title: "Active", CWD: `C:\Users\you\Projects\Codex`, Status: "active", ActiveTurnID: "turn-active"}
+	live := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, thread.ActiveTurnID, "inProgress"),
+	}}
+	service.live = live
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
+
+	response, err := service.releaseTelegramWriters(ctx)
+	if err != nil {
+		t.Fatalf("releaseTelegramWriters failed: %v", err)
+	}
+	if response == nil || !strings.Contains(strings.ToLower(response.Text), "still active") {
+		t.Fatalf("response = %#v, want active-thread refusal", response)
+	}
+	if live.closeCalls != 0 {
+		t.Fatalf("live Close calls = %d, want 0", live.closeCalls)
+	}
+}
+
+func TestReleaseTelegramWritersRefusesUnverifiableOwnedThread(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	threadID := "unverifiable-owned-thread"
+	live := &stubSession{threadReadErr: errors.New("thread read unavailable")}
+	service.live = live
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{threadID: {}}
+
+	response, err := service.releaseTelegramWriters(ctx)
+	if err != nil {
+		t.Fatalf("releaseTelegramWriters failed: %v", err)
+	}
+	if response == nil || !strings.Contains(strings.ToLower(response.Text), "could not safely verify") {
+		t.Fatalf("response = %#v, want unverifiable-thread refusal", response)
+	}
+	if live.closeCalls != 0 {
+		t.Fatalf("live Close calls = %d, want 0", live.closeCalls)
+	}
+}
+
+func TestReleaseTelegramWritersAllowsTerminalTurnWithStaleThreadStatus(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "stale-active-terminal-thread", Title: "Done", CWD: `C:\Users\you\Projects\Codex`, Status: "active", ActiveTurnID: "turn-complete"}
+	oldLive := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, thread.ActiveTurnID, "completed"),
+	}}
+	newLive := &stubSession{}
+	service.live = oldLive
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
+	service.liveFactory = func() Session { return newLive }
+
+	response, err := service.releaseTelegramWriters(ctx)
+	if err != nil {
+		t.Fatalf("releaseTelegramWriters failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "已释放") {
+		t.Fatalf("response = %#v, want release confirmation", response)
+	}
+	if oldLive.closeCalls != 1 {
+		t.Fatalf("old live Close calls = %d, want 1", oldLive.closeCalls)
+	}
+}
+
+func TestReleaseTelegramWritersRecyclesOnlyIdleLiveSession(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "idle-owned-thread", Title: "Idle", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
+	oldLive := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, "turn-complete", "completed"),
+	}}
+	poll := &stubSession{}
+	newLive := &stubSession{}
+	service.live = oldLive
+	service.poll = poll
+	service.liveConnected = true
+	service.pollConnected = true
+	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
+	service.liveFactory = func() Session { return newLive }
+
+	response, err := service.releaseTelegramWriters(ctx)
+	if err != nil {
+		t.Fatalf("releaseTelegramWriters failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "已释放") {
+		t.Fatalf("response = %#v, want release confirmation", response)
+	}
+	if oldLive.closeCalls != 1 {
+		t.Fatalf("old live Close calls = %d, want 1", oldLive.closeCalls)
+	}
+	if service.live != newLive || !service.liveConnected {
+		t.Fatalf("live session was not replaced and started: live=%p connected=%t", service.live, service.liveConnected)
+	}
+	if service.poll != poll || !service.pollConnected {
+		t.Fatal("poll session changed during writer release")
+	}
+	if len(service.liveOwnedThreads) != 0 {
+		t.Fatalf("liveOwnedThreads = %#v, want empty", service.liveOwnedThreads)
+	}
+}
+
+func TestAutoReleaseTelegramWritersAfterFiveMinutesIdle(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "auto-release-idle-thread", Title: "Idle", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
+	oldLive := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, "turn-complete", "completed"),
+	}}
+	newLive := &stubSession{}
+	service.live = oldLive
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
+	service.liveFactory = func() Session { return newLive }
+
+	base := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	now := base.Add(telegramWriterIdleTimeout - time.Second)
+	service.now = func() time.Time { return now }
+	service.writerLastActivity = base
+
+	service.autoReleaseTelegramWritersIfIdle(ctx)
+	if oldLive.closeCalls != 0 {
+		t.Fatalf("writer released before five minutes: close calls = %d", oldLive.closeCalls)
+	}
+
+	now = base.Add(telegramWriterIdleTimeout + time.Second)
+	service.autoReleaseTelegramWritersIfIdle(ctx)
+	if oldLive.closeCalls != 1 || service.live != newLive || !service.liveConnected {
+		t.Fatalf("idle writer was not recycled: close=%d live=%p connected=%t", oldLive.closeCalls, service.live, service.liveConnected)
+	}
+	if !service.telegramWriterReleased(ctx, thread.ID) {
+		t.Fatal("automatic release did not persist the writer-release marker")
+	}
+	if releasedAt, err := service.store.GetState(ctx, "writer.telegram.auto_released_at"); err != nil || strings.TrimSpace(releasedAt) == "" {
+		t.Fatalf("auto release timestamp = %q, err=%v", releasedAt, err)
+	}
+}
+
+func TestAutoReleaseTelegramWritersWaitsForActiveTurn(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "auto-release-active-thread", Title: "Active", CWD: `C:\Users\you\Projects\Codex`, Status: "active", ActiveTurnID: "turn-active"}
+	live := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, thread.ActiveTurnID, "inProgress"),
+	}}
+	service.live = live
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
+	base := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return base.Add(telegramWriterIdleTimeout + time.Minute) }
+	service.writerLastActivity = base
+
+	service.autoReleaseTelegramWritersIfIdle(ctx)
+	if live.closeCalls != 0 {
+		t.Fatalf("active writer was released: close calls = %d", live.closeCalls)
+	}
+	if service.telegramWriterReleased(ctx, thread.ID) {
+		t.Fatal("active writer was marked released")
 	}
 }
 
@@ -3987,7 +4768,7 @@ func TestSummaryPanelGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
 	}
 
 	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	token := callbackTokenForButton(buttons, "Get thread id")
+	token := callbackTokenForButton(buttons, "查看会话 ID")
 	if token == "" {
 		t.Fatalf("Get thread id button not found in %#v", buttons)
 	}
@@ -3996,7 +4777,7 @@ func TestSummaryPanelGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleCallback(get_thread_id) failed: %v", err)
 	}
-	if response == nil || response.Text != "Thread ID:\nsummary-thread-full-id\n\nTurn ID:\nsummary-turn-full-id" {
+	if response == nil || response.Text != "会话 ID：\nsummary-thread-full-id\n\n运行 ID：\nsummary-turn-full-id" {
 		t.Fatalf("response = %#v, want copyable thread/turn ids", response)
 	}
 	if response.ThreadID != thread.ID || response.TurnID != "summary-turn-full-id" {
@@ -4025,7 +4806,7 @@ func TestFinalSummaryPanelHasGetThreadIDButton(t *testing.T) {
 	}
 
 	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	if token := callbackTokenForButton(buttons, "Get thread id"); token == "" {
+	if token := callbackTokenForButton(buttons, "查看会话 ID"); token == "" {
 		t.Fatalf("Get thread id button not found in final summary buttons %#v", buttons)
 	}
 }
@@ -4051,7 +4832,7 @@ func TestFinalCardGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
 	}
 
 	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	token := callbackTokenForButton(buttons, "Get thread id")
+	token := callbackTokenForButton(buttons, "查看会话 ID")
 	if token == "" {
 		t.Fatalf("Get thread id button not found in final card buttons %#v", buttons)
 	}
@@ -4060,7 +4841,7 @@ func TestFinalCardGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleCallback(final get_thread_id) failed: %v", err)
 	}
-	if response == nil || response.Text != "Thread ID:\nfinal-card-thread-full-id\n\nTurn ID:\nfinal-card-turn-full-id" {
+	if response == nil || response.Text != "会话 ID：\nfinal-card-thread-full-id\n\n运行 ID：\nfinal-card-turn-full-id" {
 		t.Fatalf("response = %#v, want copyable final card ids", response)
 	}
 }
@@ -4090,8 +4871,8 @@ func TestFinalCardShowsRunDuration(t *testing.T) {
 	if !strings.Contains(message.Text, "Done.") {
 		t.Fatalf("final card = %q, want final answer", message.Text)
 	}
-	if !strings.Contains(message.Text, "Run duration: 1m 12s") {
-		t.Fatalf("final card = %q, want run duration footer", message.Text)
+	if !strings.Contains(message.Text, "<b>已完成</b> · 1m 12s") {
+		t.Fatalf("final card = %q, want duration in completion header", message.Text)
 	}
 }
 
@@ -4119,7 +4900,7 @@ func TestPlanFinalCardShowsTurnOffPlanButton(t *testing.T) {
 	}
 
 	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	if token := callbackTokenForButton(buttons, "Turn off Plan"); token == "" {
+	if token := callbackTokenForButton(buttons, "退出 Plan"); token == "" {
 		t.Fatalf("Turn off Plan button not found in final card buttons %#v", buttons)
 	}
 }
@@ -4150,7 +4931,7 @@ func TestPlanFinalCardShowsTurnOffPlanButtonFromLocalMarker(t *testing.T) {
 	}
 
 	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	if token := callbackTokenForButton(buttons, "Turn off Plan"); token == "" {
+	if token := callbackTokenForButton(buttons, "退出 Plan"); token == "" {
 		t.Fatalf("Turn off Plan button not found in marker-based final card buttons %#v", buttons)
 	}
 }
@@ -4178,7 +4959,7 @@ func TestNormalFinalCardDoesNotShowTurnOffPlanButton(t *testing.T) {
 	}
 
 	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	if token := callbackTokenForButton(buttons, "Turn off Plan"); token != "" {
+	if token := callbackTokenForButton(buttons, "退出 Plan"); token != "" {
 		t.Fatalf("Turn off Plan button token = %q, want absent in non-plan final buttons %#v", token, buttons)
 	}
 }
@@ -4773,30 +5554,41 @@ func (s *startCountingSession) StartCalls() int {
 }
 
 type stubSession struct {
-	threadReads         map[string]map[string]any
-	threadListResult    map[string]any
-	threadListCalls     int
-	models              []appserver.ModelOption
-	collaborationModes  []appserver.CollaborationModeOption
-	threadReadErr       error
-	threadResumeErr     error
-	threadStartErr      error
-	threadStartResult   map[string]any
-	turnStartErr        error
-	turnSteerErr        error
-	turnSteerErrs       []error
-	threadStartCalls    []string
-	threadResumeCalls   []threadResumeCall
-	turnSteerCalls      []turnCall
-	turnStartCalls      []turnCall
-	turnInterruptCalls  []turnCall
-	respondRequestCalls []respondRequestCall
-	stderrTail          []string
+	threadReads               map[string]map[string]any
+	threadListResult          map[string]any
+	threadListCalls           int
+	archivedThreadPages       map[string]map[string]any
+	models                    []appserver.ModelOption
+	collaborationModes        []appserver.CollaborationModeOption
+	threadReadErr             error
+	threadResumeErr           error
+	threadStartErr            error
+	threadStartResult         map[string]any
+	turnStartErr              error
+	turnSteerErr              error
+	turnSteerErrs             []error
+	threadStartCalls          []string
+	threadResumeCalls         []threadResumeCall
+	threadSetNameCalls        []threadNameCall
+	threadArchiveCalls        []string
+	threadUnarchiveCalls      []string
+	archivedThreadListCursors []string
+	turnSteerCalls            []turnCall
+	turnStartCalls            []turnCall
+	turnInterruptCalls        []turnCall
+	respondRequestCalls       []respondRequestCall
+	stderrTail                []string
+	closeCalls                int
 }
 
 type threadResumeCall struct {
 	threadID string
 	cwd      string
+}
+
+type threadNameCall struct {
+	threadID string
+	name     string
 }
 
 type turnCall struct {
@@ -4807,6 +5599,7 @@ type turnCall struct {
 	collaborationMode string
 	model             string
 	reasoningEffort   string
+	inputs            []control.UserInput
 }
 
 type respondRequestCall struct {
@@ -4815,13 +5608,23 @@ type respondRequestCall struct {
 }
 
 func (s *stubSession) Start(ctx context.Context) error { return nil }
-func (s *stubSession) Close() error                    { return nil }
+func (s *stubSession) Close() error {
+	s.closeCalls++
+	return nil
+}
 func (s *stubSession) Subscribe() <-chan appserver.Event {
 	return nil
 }
 func (s *stubSession) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
 	s.threadListCalls++
 	return s.threadListResult, nil
+}
+func (s *stubSession) ThreadListArchived(ctx context.Context, limit int, cursor string) (map[string]any, error) {
+	s.archivedThreadListCursors = append(s.archivedThreadListCursors, cursor)
+	if result, ok := s.archivedThreadPages[cursor]; ok {
+		return result, nil
+	}
+	return map[string]any{"data": []any{}}, nil
 }
 func (s *stubSession) ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error) {
 	if s.threadReadErr != nil {
@@ -4838,6 +5641,27 @@ func (s *stubSession) ThreadResume(ctx context.Context, threadID, cwd string) (m
 		return nil, s.threadResumeErr
 	}
 	return nil, nil
+}
+func (s *stubSession) ThreadSetName(ctx context.Context, threadID, name string) (map[string]any, error) {
+	s.threadSetNameCalls = append(s.threadSetNameCalls, threadNameCall{threadID: threadID, name: name})
+	return map[string]any{}, nil
+}
+func (s *stubSession) ThreadArchive(ctx context.Context, threadID string) (map[string]any, error) {
+	s.threadArchiveCalls = append(s.threadArchiveCalls, threadID)
+	return map[string]any{}, nil
+}
+func (s *stubSession) ThreadUnarchive(ctx context.Context, threadID string) (map[string]any, error) {
+	s.threadUnarchiveCalls = append(s.threadUnarchiveCalls, threadID)
+	return map[string]any{}, nil
+}
+func (s *stubSession) ThreadFork(ctx context.Context, threadID, cwd string) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+func (s *stubSession) ThreadCompactStart(ctx context.Context, threadID string) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+func (s *stubSession) ThreadRollback(ctx context.Context, threadID string, numTurns int) (map[string]any, error) {
+	return map[string]any{}, nil
 }
 func (s *stubSession) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {
 	s.threadStartCalls = append(s.threadStartCalls, cwd)
@@ -4873,6 +5697,33 @@ func (s *stubSession) TurnSteer(ctx context.Context, threadID, turnID, message s
 		return nil, s.turnSteerErr
 	}
 	return map[string]any{"turn": map[string]any{"id": turnID}}, nil
+}
+func (s *stubSession) TurnStartInputs(ctx context.Context, threadID string, inputs []control.UserInput, cwd string, options control.TurnStartOptions) (map[string]any, error) {
+	if s.turnStartErr != nil {
+		return nil, s.turnStartErr
+	}
+	s.turnStartCalls = append(s.turnStartCalls, turnCall{
+		threadID: threadID, message: firstUserInputText(inputs), cwd: cwd,
+		collaborationMode: options.CollaborationMode, model: options.Model, reasoningEffort: options.ReasoningEffort,
+		inputs: append([]control.UserInput(nil), inputs...),
+	})
+	return map[string]any{"turn": map[string]any{"id": "started-turn"}}, nil
+}
+func (s *stubSession) TurnSteerInputs(ctx context.Context, threadID, turnID string, inputs []control.UserInput) (map[string]any, error) {
+	s.turnSteerCalls = append(s.turnSteerCalls, turnCall{threadID: threadID, turnID: turnID, message: firstUserInputText(inputs), inputs: append([]control.UserInput(nil), inputs...)})
+	if s.turnSteerErr != nil {
+		return nil, s.turnSteerErr
+	}
+	return map[string]any{"turn": map[string]any{"id": turnID}}, nil
+}
+
+func firstUserInputText(inputs []control.UserInput) string {
+	for _, input := range inputs {
+		if input.Type == "text" {
+			return input.Text
+		}
+	}
+	return ""
 }
 func (s *stubSession) TurnInterrupt(ctx context.Context, threadID, turnID string) error {
 	s.turnInterruptCalls = append(s.turnInterruptCalls, turnCall{threadID: threadID, turnID: turnID})

@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Supersedes: the terminal finalization message-edit detail in ADR-004 and ADR-010.
+- Amended by: ADR-021 stable activity-card lifecycle.
 
 ## Context
 
@@ -14,19 +15,20 @@ Telegram edits do not provide a reliable per-edit notification contract. Therefo
 - New messages are silent by default through Telegram Bot API `disable_notification=true`.
 - Audible messages are limited to:
   - `New run`, controlled by `CTR_GO_NOTIFY_NEW_RUN` and enabled by default;
-  - a newly sent `[Final]` card;
+  - a newly sent terminal card;
+  - one compact terminal notice when a foreground Working card is completed in place;
+  - a separately sent long final result, which replaces the compact terminal notice for that turn;
   - a routeable `[Plan]` prompt-card for user input or structured choices.
 - `[commentary]`, `[Tool]`, `[Output]`, `[User]`, command/menu responses, explicit exports, and fallback/error messages are silent.
-- Finalization sends a new `[Final]` card, records its message route, moves the panel summary message id to that new card, and then best-effort deletes the old `[commentary]`, `New run`, `[Tool]`, and `[Output]` messages.
-- `[User]` remains as historical request context.
-- Details and Back callbacks remain bound to the completed run panel/card. After finalization, the panel's summary message id is the new `[Final]` message id.
+- Finalization edits an existing Working card in place. Because Telegram edits do not notify, a short foreground result also sends one de-duplicated compact terminal notice as a new audible message.
+- A fast turn with no Working card sends one audible terminal card. A long result edits the card and sends the full result as the audible new message, without an additional compact notice.
+- Details and Back callbacks remain bound to the completed run panel/card and its stable summary message id.
 
 ## Consequences
 
 - The operator receives fewer notifications while preserving alerts for run start, required Plan input, and run completion.
-- The completed-run surface is still one stable Final/Details message, but it is no longer the same Telegram message that previously held live commentary.
-- Old routes for deleted live commentary messages may remain in SQLite, but active callback routing uses the new Final card message id.
-- Cleanup failures for old live messages must not fail Final delivery.
+- The completed-run surface remains the same stable Final/Details message that previously showed Working state.
+- Compact terminal notices are attention signals, not replacement activity cards, and are de-duplicated per target/thread/turn/final fingerprint.
 
 ## Non-goals
 

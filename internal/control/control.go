@@ -15,6 +15,13 @@ type TurnStartOptions struct {
 	ReasoningEffort   string
 }
 
+type UserInput struct {
+	Type string
+	Text string
+	Path string
+	URL  string
+}
+
 type ModelOption struct {
 	ID                       string
 	DisplayName              string
@@ -62,6 +69,7 @@ type ThreadAdmin interface {
 	ThreadSetName(ctx context.Context, threadID, name string) (map[string]any, error)
 	ThreadArchive(ctx context.Context, threadID string) (map[string]any, error)
 	ThreadUnarchive(ctx context.Context, threadID string) (map[string]any, error)
+	ThreadListArchived(ctx context.Context, limit int, cursor string) (map[string]any, error)
 	ThreadCompactStart(ctx context.Context, threadID string) (map[string]any, error)
 	ThreadRollback(ctx context.Context, threadID string, numTurns int) (map[string]any, error)
 }
@@ -70,6 +78,13 @@ type Turns interface {
 	TurnStart(ctx context.Context, threadID, message, cwd string, options TurnStartOptions) (map[string]any, error)
 	TurnSteer(ctx context.Context, threadID, turnID, message string) (map[string]any, error)
 	TurnInterrupt(ctx context.Context, threadID, turnID string) error
+}
+
+// RichTurns is implemented by app-server sessions that accept structured
+// text/image inputs in a single turn request.
+type RichTurns interface {
+	TurnStartInputs(ctx context.Context, threadID string, inputs []UserInput, cwd string, options TurnStartOptions) (map[string]any, error)
+	TurnSteerInputs(ctx context.Context, threadID, turnID string, inputs []UserInput) (map[string]any, error)
 }
 
 type ServerRequests interface {

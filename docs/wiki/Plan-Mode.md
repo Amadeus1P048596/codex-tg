@@ -1,6 +1,7 @@
 # Plan Mode
 
-Plan Mode waiting input is rendered as a separate `[Plan]` card.
+Plan Mode waiting input edits the turn's activity card to `Needs input` and adds
+structured buttons when Codex supplies choices.
 
 Start Plan Mode from Telegram with `/plan <thread> <text>` or `/reply --plan <thread> <text>`. When replying to a routed thread card, `/plan <text>` and `/plan_mode <text>` use that reply route.
 
@@ -14,7 +15,7 @@ that thread starts with App Server Default Mode and then the reset is cleared.
 - `Turn off Plan` and `/stop` do not start a turn; they only arm the next ordinary `turn/start` with `collaborationMode: default`.
 - The one-shot Default reset is cleared after a successful ordinary `turn/start`; if that start fails, the reset remains.
 - `/model` and `/effort` expose button menus for the model settings used by Telegram-started collaboration-mode turns.
-- The card is routeable to the exact thread and turn.
+- The activity card is routeable to the exact thread and turn.
 - Replying to the card sends the answer back to the same Codex run.
 - Buttons appear only when Codex provides structured choices.
 - Synthetic polling prompts use `turn/steer` first and fall back to `turn/start` only when the active turn is gone.

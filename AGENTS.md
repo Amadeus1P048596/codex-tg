@@ -66,19 +66,29 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 ## Telegram UX Invariants
 
 - Global observer is a single target. `/observe all` moves it; `/observe off` disables passive monitoring.
-- Foreign GUI/CLI runs must render in this order: `New run`, `[User]`, `[commentary]`, `[Tool]`, `[Output]`.
-- If a foreign prompt is not available at panel creation, render a `[User]` placeholder and later edit the same message.
-- Telegram-originated runs create `New run` and the live trio, but do not duplicate the user's Telegram message as `[User]`.
-- Active runs keep live trio visibility. Completed runs collapse the summary message into one Final Card with Details view-state.
+- One Codex turn normally owns one Telegram activity card. Use `typing` for the
+  first four seconds, then create Working only if the turn is still active.
+- Aggregate raw commentary, tool, output, and lifecycle events. Do not render
+  `[Tool]`, `[Output]`, empty-output placeholders, or one Telegram message per event.
+- Active card edits have a four-second minimum interval. Needs-input and terminal
+  transitions bypass the throttle.
+- Finalization edits the Working card in place. A fast turn sends one terminal
+  card; a long final may continue in separate `Codex · Result` messages.
+- The leading emoji is conversation identity, not state. The primary Telegram
+  UI uses the Chinese state labels `处理中`, `需要输入`, `已完成`, `失败`, and
+  `已取消`; internal protocol state names remain unchanged.
 - `Details` pagination edits the same message; it must not create a stream of replacement pages.
 - `Tools file` and `Get full log` are explicit on-demand exports. Automatic per-tool document spam is forbidden.
-- Document exports should use in-memory multipart upload. Temp files are allowed only as fallback and must be cleaned up.
-- Plan Mode waiting input is a separate routeable `[Plan]` prompt-card. Buttons are allowed only for structured choices provided by Codex.
+- Document exports should use in-memory multipart upload. Temporary Telegram
+  photo inputs must be private, bounded, and removed after App Server accepts them.
+- Plan Mode waiting input uses the routeable activity card. Buttons are allowed
+  only for structured choices provided by Codex.
 - Telegram-originated Plan Mode starts must pass App Server `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are Telegram button menus for collaboration-mode model settings. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
 - Replies to active turns should steer the active turn. If steering is rejected while the thread still looks active, do not start a parallel turn.
 - Stale active-turn ghosts are different: if `thread/read` exposes a final answer or `turn/steer` says `no active turn to steer`, follow the branch's lifecycle ADR or contract note when present and allow a new `turn/start` after re-read instead of returning a false parallel-turn warning.
-- Every observer-visible message must include the shared identity header: emoji marker, project, thread, `T:`, `R:`, and kind.
+- Every activity card includes the emoji marker, Codex label, textual state, and
+  short `T:`/`R:` metadata when available. Full ids are opt-in diagnostics.
 - Emoji markers are visual hints only. Persisted message routes and callback tokens are the routing authority.
 
 ## Routing Precedence

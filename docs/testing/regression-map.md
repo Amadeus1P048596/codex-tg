@@ -46,6 +46,8 @@ Primary tests:
 
 - `internal/config/config_test.go::TestParseEnvFileSupportsCommentsAndQuotes`
 - `internal/config/config_test.go::TestParseEnvFileRejectsInvalidLine`
+- `internal/config/config_test.go::TestParseEnvFilePreservesQuotedWindowsPath`
+- `internal/config/config_test.go::TestParseEnvFileDecodesStrconvQuotedWindowsPath`
 - `internal/config/config_test.go::TestLoadReadsConfigFileAndEnvOverridesIt`
 - `internal/config/config_test.go::TestLoadAppliesRuntimeProxyEnvFromConfigFile`
 - `internal/config/config_test.go::TestLoadDoesNotOverrideExplicitRuntimeProxyEnv`
@@ -62,11 +64,17 @@ Primary tests:
 - `cmd/ctr-go/service_test.go::TestServiceStartAcceptsKickstartFailureWhenServiceLoaded`
 - `internal/trayapp/actions_test.go::TestCTRGoArgs`
 - `internal/trayapp/actions_test.go::TestServiceSetupArgs`
+- `internal/appserver/client_test.go::TestBuildCommandScopesCodexHomeToAppServer`
 
 Contract notes:
 
 - `config.env` is local runtime state and must not be committed.
 - Explicit environment variables override config file values.
+- `CTR_GO_CODEX_HOME` is applied only to spawned App Server children; it must
+  not mutate the parent process environment.
+- Client-private Codex runtime SQLite/session state must never be linked between
+  Desktop and Telegram homes. Shared static resources and an independent durable
+  memory store are allowed.
 - macOS LaunchAgent plists must carry only `CTR_GO_CONFIG`, never token/user/cwd env values.
 - Proxy env needed by the operator shell may be stored in the private config and
   applied by the process after startup.
@@ -138,8 +146,14 @@ Primary tests:
 - `internal/daemon/service_test.go::TestProjectNewThreadRejectsThreadStartWithoutID`
 - `internal/daemon/service_test.go::TestProjectNewThreadTurnStartFailureSavesThread`
 - `internal/daemon/service_test.go::TestNewChatCommandCreatesCodexUIChatCWDAndBinds`
+- `internal/daemon/service_test.go::TestNewChatCommandWithoutPromptCollectsTitleThenPrompt`
 - `internal/daemon/service_test.go::TestNewChatCWDUsesFallbackSlugAndCollisionSuffix`
 - `internal/daemon/service_test.go::TestNewThreadCommandCreatesThreadWithoutCWDAndBinds`
+- `internal/daemon/service_test.go::TestNewThreadCommandWithoutPromptCollectsTitleThenPrompt`
+- `internal/daemon/service_test.go::TestCancelClearsPendingNewChatOrNewThreadPrompt`
+- `internal/daemon/service_test.go::TestPendingNewChatPromptExpiresAndDoesNotStartThread`
+- `internal/daemon/service_test.go::TestPendingNewThreadPromptSurvivesServiceRestart`
+- `internal/daemon/service_test.go::TestInlineNewThreadCommandClearsOlderPendingCreation`
 - `internal/daemon/service_test.go::TestNewChatCommandRejectsMissingThreadID`
 - `internal/daemon/service_test.go::TestNewChatCommandTurnStartFailureSavesAndBindsThread`
 - `internal/daemon/service_test.go::TestNewThreadCommandTurnStartFailureSavesAndBindsThread`
@@ -152,8 +166,10 @@ Live E2E:
 
 - Open `/projects`, choose a project, press `New thread`, send a prompt, and verify a new thread/run reaches `[Final]`.
 - Open `/projects`, verify normal projects are sorted by recent activity, `Documents/Codex` threads are shown only as latest Chat previews, then open full `Chats` pagination and select a Chat.
-- Run `/newchat <prompt>`, verify the new thread reaches `[Final]`, the generated cwd exists under the configured Chats root, `/projects -> Open Chats` shows it, and a plain follow-up routes to the newly bound Chat thread.
-- Run `/newthread <prompt>`, verify the new thread reaches `[Final]` without creating a Chat cwd under the configured Chats root.
+- Run `/newchat`, enter a title, then enter a distinct prompt. Verify the App Server title matches the first input, only the second input starts the turn, the title-derived cwd exists under the configured Chats root, the thread reaches its Completed card, `/projects -> Open Chats` shows it, and a plain follow-up routes to the newly bound Chat thread.
+- Run `/newthread`, enter a title and then a distinct prompt. Verify the title is written through, only the prompt starts the turn, and no Chat cwd is created under the configured Chats root.
+- Arm either title-then-prompt flow, send `/cancel` at either stage, and verify the next plain message is not consumed as creation input. Repeat across a daemon restart and after the 15-minute expiry boundary.
+- Run the one-line `/newchat <prompt>` and `/newthread <prompt>` forms and verify backward compatibility.
 - Send a plain reply after creation and verify it routes to the newly bound thread.
 - Run a Plan Mode prompt with structured choices and verify choice buttons appear only on the current `[Plan]` card.
 
@@ -163,8 +179,10 @@ Contract notes:
 - Threads under generic `Documents/Codex` cwd roots or configured `CTR_GO_CODEX_CHATS_ROOT` are Codex UI `Chats`, not normal projects. A Chat selection opens and binds its single thread; Chat lists do not expose project `New thread`.
 - Main `/projects` uses project pagination with configurable preview limits and keeps latest Chat previews newest-first. Full Chat pagination lives behind `Open Chats`.
 - Project buttons use `N. Project name`; Chat buttons use `Chat N. Thread name`. The menu must not render internal `key:` rows and must show each project row's `last thread:`.
-- `/newchat <prompt>` creates a dated Chat cwd from a prompt slug and passes that cwd to App Server `thread/start`.
+- `/newchat <prompt>` creates a dated Chat cwd from a prompt slug and passes that cwd to App Server `thread/start`; it remains the backward-compatible one-line form.
 - `/newthread <prompt>` creates a new App Server thread without a Telegram-selected cwd parameter. It must not create a Chat folder; App Server may still attach the daemon default cwd.
+- `/newchat` and `/newthread` without prompts collect an explicit title and then a distinct first prompt. The pending stage, title, and context are SQLite-backed, survive restart, expire after 15 minutes, and `/cancel` deletes them. The title is written to App Server and retained as user-owned Telegram metadata.
+- A one-line `/newchat <prompt>` or `/newthread <prompt>` clears any older pending creation state before starting immediately.
 - Telegram must not accept arbitrary local filesystem paths for thread creation.
 - The first prompt is required; create-only threads are out of scope for this slice.
 
@@ -183,6 +201,14 @@ Contract notes:
 
 - Header chips like `T:d663` and `R:d9bc` are visual hints only.
 - Operators must be able to retrieve copyable full ids from Telegram without SQLite/log access.
+- The default activity card emphasizes the conversation marker, Codex, textual
+  state, result, and timing. Short ids remain secondary code-styled metadata.
+
+Primary rendering tests:
+
+- `internal/daemon/visual_identity_test.go::TestVisualCardHeaderPrioritizesTitleRoleStatusAndTiming`
+- `internal/daemon/observer_ui_v2_test.go::TestUserAndFinalCardsEmphasizeIdentityStatusAndTiming`
+- `internal/daemon/observer_ui_v2_test.go::TestRenderSummaryPanelShowsActiveRunElapsedTimeInHeader`
 
 ## Final Card Details Binding
 
@@ -203,38 +229,122 @@ Contract notes:
 - `Details`, pagination, `Tool on`, `Tools file`, and `Back` are bound to the completed panel/card that produced the callback.
 - A Details callback without a valid `panel_id`, with a mismatched thread/turn, or from another Telegram message is stale and must not edit/export current run data.
 - Pressing `Back` on an older completed run must restore that older Final Card in the same message, not duplicate or replace it with the latest run.
-- Finalization sends a new Final Card and moves the panel summary message id to it; Details/Back must edit that new card, not the deleted live commentary card.
+- Finalization edits the Working card in place. Details/Back stay bound to that
+  same summary message id and must never target a newer turn.
 - Tool-only turns with no commentary and empty output still expose completed command/status in Details, Tool mode, and Tools file under `Tool activity`.
 
-## Telegram Notification Contract
+## Telegram Activity Card And Notification Contract
 
-ADR: `docs/adr/ADR-015-telegram-notification-contract.md`
+ADR: `docs/adr/ADR-015-telegram-notification-contract.md` and
+`docs/adr/ADR-021-telegram-activity-card-lifecycle.md`; feature brief is
+`docs/process/telegram-output-style-v2-brief.md`.
 
 Primary tests:
 
+- `internal/daemon/activity_aggregator_test.go`
+- `internal/daemon/activity_lifecycle_test.go`
+- `internal/daemon/activity_lifecycle_test.go::TestShortFinalCompletesWorkingCardAndSendsAudibleNotice`
+- `internal/daemon/notification_style_test.go`
+- `internal/tgformat/html_test.go`
 - `internal/telegram/api_test.go::TestClientSendMessageSilentSetsDisableNotification`
+- `internal/telegram/api_test.go::TestClientSendChatActionTargetsTopic`
+- `internal/telegram/api_test.go::TestClientGetsAndDownloadsTelegramFileWithLimit`
 - `internal/telegram/api_test.go::TestClientSendDocumentSilentSetsDisableNotification`
 - `internal/telegram/bot_test.go::TestBotDeliverDirectResponseSendsSilentMessage`
+- `internal/telegram/bot_test.go::TestLargestTelegramPhotoSelectsHighestResolution`
+- `internal/appserver/client_test.go::TestTurnStartInputParamsIncludesTextAndLocalImage`
+- `internal/daemon/service_test.go::TestHandleMessageWithLocalImageStartsRichTurn`
 - `internal/config/config_test.go::TestMarshalJSONIncludesNotifyNewRun`
 - `tests/config_env_test.go::TestFromEnvDefaultsLoggingOn`
 - `tests/config_env_test.go::TestFromEnvPrefersGoScopedEnvVars`
 - `internal/daemon/observer_ui_v2_test.go::TestSyncThreadPanelCreatesRouteablePlanPromptAndDedupes`
-- `internal/daemon/observer_ui_v2_test.go::TestRunNoticeNotificationFlagCanSilenceNewRun`
-- `internal/daemon/observer_ui_v2_test.go::TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser`
 - `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile`
+- `internal/daemon/service_test.go::TestThreadsCommandUsesPreviewForPlaceholderTitleAndUnicodeSafeButtons`
+- `internal/daemon/service_test.go::TestThreadsCommandDoesNotExposeCachedThreadsMissingFromCurrentRuntime`
+- `internal/daemon/service_test.go::TestShowThreadRejectsCachedThreadMissingFromCurrentRuntime`
+- `internal/daemon/foreground_session_test.go::TestBackgroundThreadSuppressesProgressAndSendsOneCompletionNotice`
+- `internal/daemon/foreground_session_test.go::TestBackgroundThreadSendsOneNeedsInputNoticeWithoutShowingProgressCard`
+- `internal/daemon/foreground_session_test.go::TestSwitchThreadHidesPreviousWorkingCardAndShowsSelectedCard`
+- `internal/daemon/thread_admin_test.go::TestNewThreadUsesPromptTitleWhileAppServerTitleIsPlaceholder`
+- `internal/daemon/thread_admin_test.go::TestNewThreadBecomesTheForegroundSession`
+- `internal/daemon/thread_admin_test.go::TestSyncThreadsPreservesPromptTitleUntilRuntimePublishesRealTitle`
+- `internal/daemon/thread_admin_test.go::TestTitleCommandEditsCurrentActivityCardInPlace`
+- `internal/daemon/thread_admin_test.go::TestCurrentCommandShowsForegroundThreadTitleStatusAndShortID`
+- `internal/daemon/thread_admin_test.go::TestArchiveCommandRequiresConfirmationThenArchivesCurrentThread`
+- `internal/daemon/thread_admin_test.go::TestArchiveCommandBlocksRunningOrWaitingThread`
+- `internal/daemon/thread_admin_test.go::TestArchiveConfirmationCanBeCancelledWithoutArchiving`
+- `internal/appserver/thread_archive_compat_test.go::TestThreadArchivePreparesWindowsStateBeforeRPC`
+- `internal/appserver/thread_archive_compat_test.go::TestPrepareThreadArchiveStateNormalizesWindowsExtendedPath`
+- `internal/daemon/thread_admin_test.go::TestUnarchiveListsTenPerPageAndRestoresClickedThread`
 
 Live E2E:
 
-- Run a Telegram-origin command with `CTR_GO_NOTIFY_NEW_RUN=on`; verify `New run`, live silent cards, new `[Final]`, and Details/Back.
-- Repeat with `CTR_GO_NOTIFY_NEW_RUN=off`; verify `New run` remains visible and `[Final]` still arrives.
-- Run a Plan Mode structured-choice prompt and verify `[Plan]` is the only question card with answer buttons.
+- `go test -tags live_e2e ./internal/appserver -run LiveWindowsThreadArchiveCompat`
+  creates an isolated thread, injects the affected Windows path prefix, and
+  verifies that the real App Server archives it successfully.
+- `internal/daemon/thread_navigation_test.go::TestHomeShowsCurrentSessionAndPersistentInboxCount`
+- `internal/daemon/thread_navigation_test.go::TestStartOpensTheSessionHome`
+- `internal/daemon/thread_navigation_test.go::TestHomeNewSessionChooserArmsTwoStepPromptInPlace`
+- `internal/daemon/thread_navigation_test.go::TestInboxPersistsBackgroundAttentionAndSwitchClearsIt`
+- `internal/daemon/thread_navigation_test.go::TestPrimaryActivityCardUsesChineseStatusAndLabels`
+
+Live E2E:
+
+- Run a sub-four-second turn and verify typing followed by one terminal card.
+- Run a slow tool sequence and verify one Working message is edited no more than
+  once every four seconds, becomes Completed in place, and produces one compact
+  audible completion notice.
+- Verify raw `[Tool]`, `[Output]`, `Last completed tool`, and empty-output labels
+  never appear in the default card.
+- Send a photo with and without a caption to a bound thread and verify the image
+  reaches Codex and follows the same one-card lifecycle.
+- Run a Plan Mode structured-choice prompt and verify the summary card becomes
+  Needs input with the correct answer buttons.
 
 Contract notes:
 
-- All new bot messages are silent except `New run`, `[Plan]`, and `[Final]`.
-- `New run` notification is configurable and enabled by default.
+- Activity cards render the thread/task title as the primary first row, with
+  the conversation marker before it and Codex/state/duration on the second row.
+- Missing titles use the compact one-row status fallback and must not render an
+  empty bold element.
+- The first four seconds use Telegram typing only; a typing API failure creates
+  the Working card immediately.
+- One turn normally owns one message. Active edits have a four-second floor;
+  terminal and input-required transitions bypass it.
+- A short foreground terminal transition sends one de-duplicated compact audible
+  notice because Telegram does not notify for edits. Fast terminal cards and
+  separately sent long results are already audible and do not add that notice.
+- The leading emoji is conversation identity. Status is text, never a replacement emoji.
+- Raw tool events are aggregated, de-duplicated, prioritized, and reduced to at
+  most three activities plus one compact current command.
+- Short finals edit the activity card in place. Long finals complete that card
+  and may continue in separate `Codex · Result` messages.
+- Photo input uses Telegram `getFile` plus App Server `localImage`; no photo
+  receipt or User card is created.
 - Explicit exports and direct command/menu responses are silent.
-- Old live commentary routes may remain in SQLite after deletion, but active Details routing uses the new Final card message id.
+- Legacy Tool/Output views are diagnostic drill-down surfaces only.
+- One chat/topic has one foreground thread. Background progress produces no
+  Working cards; terminal and needs-input states produce one de-duplicated
+  switch notice.
+- Switching deletes the previous non-terminal foreground card and displays the
+  selected thread's current card.
+- `/threads` uses only the current Telegram runtime's thread list and renders
+  session titles as Unicode-safe inline buttons. Stale cached Desktop sessions
+  must not be listed or opened.
+- Interactive `/newchat` and `/newthread` titles are written through and retained
+  as user-owned metadata. UUID and generic new-thread titles do not overwrite a
+  prompt-derived fallback for legacy one-line creation; a real App Server title may replace an automatic fallback. `/title` writes
+  through, marks the title as user-owned, and updates the current card without
+  creating a replacement card.
+- `/current` shows only the foreground session with short metadata. `/archive`
+  requires confirmation and rejects a stale confirmation after focus changes.
+  Active and input-waiting sessions cannot be archived. `/unarchive` uses App
+  Server's archived filter, ten-row cursor pages, title buttons, and in-place
+  restore results with switch/continue actions.
+- `/start` and `/home` render the session hub. `/inbox` persists background
+  terminal/input attention, and switching clears the selected item.
+- Primary status and button copy is Chinese while command names and internal
+  protocol state remain stable.
 
 ## Turn Lifecycle And Stale Active Recovery
 
@@ -258,13 +368,28 @@ Contract notes:
 
 ## App Server Session Lifecycle
 
-ADR: `docs/adr/ADR-012-turn-lifecycle-normalization.md`
+ADR: `docs/adr/ADR-012-turn-lifecycle-normalization.md` and
+`docs/adr/ADR-020-telegram-writer-handoff.md`; feature brief is
+`docs/process/telegram-writer-handoff-brief.md`.
 
 Primary tests:
 
 - `internal/daemon/service_test.go::TestEnsureLiveSessionSerializedAgainstReconcile`
 - `internal/daemon/service_test.go::TestRepairInvalidatesOldLiveLoop`
 - `internal/daemon/service_test.go::TestControlLoopProcessesRepairBeforeReconcile`
+- `internal/daemon/service_test.go::TestBootstrapTrackedStateResumesBoundThreadByDefault`
+- `internal/daemon/service_test.go::TestBootstrapTrackedStateSkipsManuallyReleasedBoundThread`
+- `internal/daemon/service_test.go::TestBindHereAcquiresWriterAndShowsReleaseButton`
+- `internal/daemon/service_test.go::TestBindHereKeepsRouteAndReportsAnotherWriterConflict`
+- `internal/daemon/service_test.go::TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession`
+- `internal/daemon/service_test.go::TestSendInputWriterConflictReturnsDirectResponseWithoutQueue`
+- `internal/daemon/service_test.go::TestReleaseTelegramWritersRefusesActiveOwnedThread`
+- `internal/daemon/service_test.go::TestReleaseTelegramWritersRefusesUnverifiableOwnedThread`
+- `internal/daemon/service_test.go::TestReleaseTelegramWritersAllowsTerminalTurnWithStaleThreadStatus`
+- `internal/daemon/service_test.go::TestReleaseTelegramWritersRecyclesOnlyIdleLiveSession`
+- `internal/daemon/service_test.go::TestAutoReleaseTelegramWritersAfterFiveMinutesIdle`
+- `internal/daemon/service_test.go::TestAutoReleaseTelegramWritersWaitsForActiveTurn`
+- `internal/telegram/bot_test.go::TestDefaultCommandsExposeNewChatMenuCommand`
 - `internal/appserver/client_test.go::TestClientStartConcurrentCallsShareInitializedSession`
 - `internal/appserver/client_test.go::TestClientStartFailureLeavesClientRetryable`
 
@@ -273,6 +398,9 @@ Contract notes:
 - One live App Server session has one live event loop per generation.
 - Stale old live-loop closes must not clear newer session state.
 - Repair is serialized with reconcile/startup and is processed before replacement reconcile.
+- Bind acquires a writer; repair/restart reacquire bound writers unless manually released, while observer-only tracking stays read-only.
+- Explicit Telegram writes acquire a writer at dispatch time; another-client writer conflicts fail immediately without queueing or parallel turns.
+- `/release` and the session-card release button fail closed for active or unverifiable Telegram-owned threads, persist release markers, and otherwise replace only the live session.
 
 ## Transient Interrupted Gating
 
@@ -305,9 +433,13 @@ Contract notes:
 - Implicit Telegram-origin `interrupted` is ambiguous until it recovers, expires, or follows explicit `/stop`.
 - Deferred terminal state must not collapse the live panel into a false Final Card.
 - The daemon must keep polling deferred turns hot.
-- Telegram-origin turns get a short App Server `thread/read` hot-poll window after start so `[Tool]` can become visible even when live events do not expose the running command.
-- If App Server still has not exposed a tool for an active turn, `[Tool]` must show neutral active-run elapsed time instead of a static empty state.
-- Late live tool notifications from older turns must not overwrite a newer completed turn or reintroduce stale `[Tool]` / `[Output]` content.
+- Telegram-origin turns get a short App Server `thread/read` hot-poll window
+  after start so long-running tools can become visible as an activity even when
+  live events do not expose the running command.
+- If App Server has not exposed a meaningful tool, the Working card shows normal
+  elapsed progress without an empty-tool placeholder.
+- Late live tool notifications from older turns must not overwrite a newer
+  completed turn or reintroduce stale activities.
 
 ## Nil-Safe Telegram Rendering
 
@@ -328,7 +460,9 @@ Live E2E:
 - checked-in public-safe harness: `tests/live_e2e/telegram_readback_e2e.py`
 - run against a dedicated private test thread from local env, not the working operator thread
 - scenarios: sequential `pwd`, `date`, `printf`, dedicated sleep-20 timing, slow command, and multi-command math through `/reply`
-- acceptance: scan edited Telegram `[Tool]`, `[Output]`, and `[Final]` messages for literal `"<nil>"`, stale commands from earlier runs, false parallel-turn rejection, and visible non-final `interrupted`
+- acceptance: scan edited Working/terminal cards for literal `"<nil>"`, stale
+  commands from earlier runs, false parallel-turn rejection, and visible
+  non-final `interrupted`
 
 Contract notes:
 
@@ -396,13 +530,17 @@ Contract notes:
 - App Server live item notifications may update snapshot/detail history.
 - Telegram-origin turns may render current command visibility from live `item/started` and `item/updated` only after matching the marked `thread_id + turn_id`.
 - Foreign GUI/CLI runs do not promise authoritative current command visibility.
-- Long-running active runs render elapsed runtime in `[commentary]`; completed Final Cards render total `Run duration`.
-- `[Tool]` renders the current tool only for eligible Telegram-origin active turns; otherwise it renders the last completed tool, or `No completed tool yet.` when no completed tool is available.
-- While a Telegram-origin live current tool is active, older completed tool evidence from same-turn `thread/read` may update `[Output]`, but must not make `[Tool]` revert from the current command to the older completed command.
+- Long-running active runs render elapsed runtime in the Working card; terminal
+  cards render total duration in the header.
+- Live tools feed the Activity Aggregator. Fast incidental operations are
+  normally count-only; important or long-running operations may become the
+  current activity and expose one compact real command.
+- While a Telegram-origin live current tool is active, older completed evidence
+  may add recent activities but must not replace the current activity.
 - Empty/interrupted polling snapshots must not overwrite a fresher stored live current tool for the same Telegram-origin turn.
-- `[Output]` renders the last completed tool output when available.
+- Raw output remains available through explicit Details and export surfaces.
 - Session JSONL is not a live Telegram UI source.
-- Missing App Server tool state renders as neutral absence, not as a guessed command.
+- Missing App Server tool state does not render placeholder implementation text.
 - Session JSONL can still be used for explicit full-log export paths.
 
 Slice gate:

@@ -26,6 +26,7 @@ type ModelOption = control.ModelOption
 type CollaborationModeOption = control.CollaborationModeOption
 
 var _ control.ControlPlane = (*Client)(nil)
+var _ control.RichTurns = (*Client)(nil)
 
 type rpcResponse struct {
 	Result any
@@ -34,9 +35,11 @@ type rpcResponse struct {
 
 type Client struct {
 	codexBin       string
+	codexHome      string
 	listenURL      string
 	cwd            string
 	requestTimeout time.Duration
+	fullAccess     bool
 
 	startMu        sync.Mutex
 	mu             sync.Mutex
@@ -55,12 +58,23 @@ type Client struct {
 	serverRequests map[string]map[string]any
 }
 
-func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration) *Client {
+type ClientOptions struct {
+	FullAccess bool
+	CodexHome  string
+}
+
+func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration, options ...ClientOptions) *Client {
+	clientOptions := ClientOptions{}
+	if len(options) > 0 {
+		clientOptions = options[0]
+	}
 	return &Client{
 		codexBin:       codexBin,
+		codexHome:      strings.TrimSpace(clientOptions.CodexHome),
 		listenURL:      listenURL,
 		cwd:            cwd,
 		requestTimeout: requestTimeout,
+		fullAccess:     clientOptions.FullAccess,
 		pending:        map[uint64]chan rpcResponse{},
 		serverRequests: map[string]map[string]any{},
 		readerDone:     make(chan struct{}),
@@ -289,15 +303,32 @@ func (c *Client) RespondServerRequest(ctx context.Context, requestID string, res
 }
 
 func (c *Client) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
-	params := map[string]any{"limit": limit, "sortKey": "updated_at"}
-	if strings.TrimSpace(cursor) != "" {
-		params["cursor"] = cursor
-	}
+	params := threadListParams(limit, cursor, nil)
 	result, err := c.Request(ctx, "thread/list", params)
 	if err != nil {
 		return nil, err
 	}
 	return asMap(result), nil
+}
+
+func (c *Client) ThreadListArchived(ctx context.Context, limit int, cursor string) (map[string]any, error) {
+	archived := true
+	result, err := c.Request(ctx, "thread/list", threadListParams(limit, cursor, &archived))
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func threadListParams(limit int, cursor string, archived *bool) map[string]any {
+	params := map[string]any{"limit": limit, "sortKey": "updated_at"}
+	if strings.TrimSpace(cursor) != "" {
+		params["cursor"] = strings.TrimSpace(cursor)
+	}
+	if archived != nil {
+		params["archived"] = *archived
+	}
+	return params
 }
 
 func (c *Client) ThreadFork(ctx context.Context, threadID, cwd string) (map[string]any, error) {
@@ -328,6 +359,9 @@ func (c *Client) ThreadSetName(ctx context.Context, threadID, name string) (map[
 }
 
 func (c *Client) ThreadArchive(ctx context.Context, threadID string) (map[string]any, error) {
+	if err := c.prepareThreadArchive(threadID); err != nil {
+		return nil, fmt.Errorf("prepare thread archive: %w", err)
+	}
 	result, err := c.Request(ctx, "thread/archive", map[string]any{"threadId": threadID})
 	if err != nil {
 		return nil, err
@@ -389,11 +423,15 @@ func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[st
 }
 
 func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string, options TurnStartOptions) (map[string]any, error) {
+	return c.TurnStartInputs(ctx, threadID, []control.UserInput{{Type: "text", Text: message}}, cwd, options)
+}
+
+func (c *Client) TurnStartInputs(ctx context.Context, threadID string, inputs []control.UserInput, cwd string, options TurnStartOptions) (map[string]any, error) {
 	resolved, err := c.resolveTurnStartOptions(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	params, err := turnStartParams(threadID, message, cwd, resolved)
+	params, err := turnStartInputParams(threadID, inputs, cwd, resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -405,11 +443,13 @@ func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string, o
 }
 
 func turnStartParams(threadID, message, cwd string, options TurnStartOptions) (map[string]any, error) {
+	return turnStartInputParams(threadID, []control.UserInput{{Type: "text", Text: message}}, cwd, options)
+}
+
+func turnStartInputParams(threadID string, inputs []control.UserInput, cwd string, options TurnStartOptions) (map[string]any, error) {
 	params := map[string]any{
 		"threadId": threadID,
-		"input": []map[string]any{
-			{"type": "text", "text": message, "text_elements": []any{}},
-		},
+		"input":    appServerUserInputs(inputs),
 	}
 	if strings.TrimSpace(cwd) != "" {
 		params["cwd"] = cwd
@@ -434,6 +474,27 @@ func turnStartParams(threadID, message, cwd string, options TurnStartOptions) (m
 		}
 	}
 	return params, nil
+}
+
+func appServerUserInputs(inputs []control.UserInput) []map[string]any {
+	out := make([]map[string]any, 0, len(inputs))
+	for _, input := range inputs {
+		switch strings.TrimSpace(input.Type) {
+		case "localImage":
+			if path := strings.TrimSpace(input.Path); path != "" {
+				out = append(out, map[string]any{"type": "localImage", "path": path})
+			}
+		case "image":
+			if url := strings.TrimSpace(input.URL); url != "" {
+				out = append(out, map[string]any{"type": "image", "url": url})
+			}
+		case "text", "":
+			if text := strings.TrimSpace(input.Text); text != "" {
+				out = append(out, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
+			}
+		}
+	}
+	return out
 }
 
 func (c *Client) resolveTurnStartOptions(ctx context.Context, options TurnStartOptions) (TurnStartOptions, error) {
@@ -736,16 +797,14 @@ func (c *Client) TurnInterrupt(ctx context.Context, threadID, turnID string) err
 }
 
 func (c *Client) TurnSteer(ctx context.Context, threadID, turnID, message string) (map[string]any, error) {
+	return c.TurnSteerInputs(ctx, threadID, turnID, []control.UserInput{{Type: "text", Text: message}})
+}
+
+func (c *Client) TurnSteerInputs(ctx context.Context, threadID, turnID string, inputs []control.UserInput) (map[string]any, error) {
 	result, err := c.Request(ctx, "turn/steer", map[string]any{
 		"threadId":       threadID,
 		"expectedTurnId": turnID,
-		"input": []map[string]any{
-			{
-				"type":          "text",
-				"text":          message,
-				"text_elements": []any{},
-			},
-		},
+		"input":          appServerUserInputs(inputs),
 	})
 	if err != nil {
 		return nil, err
@@ -766,18 +825,49 @@ func (c *Client) buildCommand() (*exec.Cmd, error) {
 	if err != nil {
 		executable = c.codexBin
 	}
+	args := appServerArgs(c.listenURL, c.fullAccess)
 	if runtime.GOOS == "windows" {
 		ext := strings.ToLower(filepath.Ext(executable))
 		if ext == ".cmd" || ext == ".bat" {
-			command := fmt.Sprintf("%s app-server --listen %s", executable, c.listenURL)
+			command := strings.Join(append([]string{executable}, args...), " ")
 			cmd := exec.Command(os.Getenv("ComSpec"), "/d", "/c", command)
 			cmd.Dir = c.cwd
+			cmd.Env = appServerEnvironment(c.codexHome)
 			return cmd, nil
 		}
 	}
-	cmd := exec.Command(executable, "app-server", "--listen", c.listenURL)
+	cmd := exec.Command(executable, args...)
 	cmd.Dir = c.cwd
+	cmd.Env = appServerEnvironment(c.codexHome)
 	return cmd, nil
+}
+
+func appServerEnvironment(codexHome string) []string {
+	codexHome = strings.TrimSpace(codexHome)
+	if codexHome == "" {
+		return nil
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, pair := range env {
+		key, _, ok := strings.Cut(pair, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "CODEX_HOME") {
+			continue
+		}
+		out = append(out, pair)
+	}
+	return append(out, "CODEX_HOME="+codexHome)
+}
+
+func appServerArgs(listenURL string, fullAccess bool) []string {
+	args := make([]string, 0, 7)
+	if fullAccess {
+		args = append(args,
+			"-c", "approval_policy=never",
+			"-c", "sandbox_mode=danger-full-access",
+		)
+	}
+	return append(args, "app-server", "--listen", listenURL)
 }
 
 func (c *Client) readStdout(generation uint64) {

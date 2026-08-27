@@ -72,7 +72,7 @@ func RenderSegments(segments []Segment, maxLen int) []model.RenderedMessage {
 }
 
 func HashRendered(message model.RenderedMessage) string {
-	parts := []string{message.Text}
+	parts := []string{message.Text, message.ParseMode, message.PlainText}
 	for _, entity := range message.Entities {
 		parts = append(parts, fmt.Sprintf("%s:%d:%d:%s:%s", entity.Type, entity.Offset, entity.Length, entity.URL, entity.Language))
 	}

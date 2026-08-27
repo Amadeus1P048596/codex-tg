@@ -88,14 +88,15 @@ COUNT=2034 SUM=115514223
 ```
 
 `newchat_folder` is opt-in and not part of the default case list. It sends
-`/newchat`, verifies a `tool-call...` folder appears under the configured Chats
-root and `/context` is bound to that cwd, then sends `/newthread` and verifies no
-Chat folder is created for the no-Chat-folder escape hatch.
+`/newchat`, supplies a title and then a distinct prompt, verifies the title-based
+folder appears under the configured Chats root and `/context` is bound to that
+cwd, then repeats the title/prompt flow with `/newthread` and verifies no Chat
+folder is created for the no-Chat-folder escape hatch.
 
 `notification_contract` is opt-in and not part of the default case list. It
-verifies that Final is sent as a new card instead of reusing live
-`[commentary]`, the old commentary card is deleted, Details/Back remain bound
-to the new Final card, and a Plan prompt is routeable. When App Server exposes
+verifies that the Working card becomes Final in place, one compact completion
+notice is added, Details/Back remain bound to the stable Final card, and a Plan
+prompt is routeable. When App Server exposes
 structured Plan options, the case answers through the `[Plan]` buttons; otherwise
 it records a fallback and answers by replying to the Plan card.
 

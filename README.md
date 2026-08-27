@@ -19,7 +19,14 @@ and other private adapters.
 - Thread-first routing keeps replies, tools, Plan Mode, Details, and Final cards attached to the right run.
 - Built toward long-running local coding-agent orchestration and future router-agent workflows.
 
-Current release: `v0.5.0`.
+Current fork release: `v0.5.0-amadeus.1` (source release), based on upstream
+`v0.5.0`.
+
+> **Fork notice:** this repository is a community fork of
+> [`mideco-tech/codex-tg`](https://github.com/mideco-tech/codex-tg). The original
+> project and its contributors are gratefully acknowledged. See
+> [FORK_NOTES.md](FORK_NOTES.md) for the modification summary, validation scope,
+> upstream relationship, and Apache-2.0 attribution.
 
 ![codex-tg Telegram Plan Mode demo](docs/assets/telegram-plan-mode-demo.png)
 
@@ -58,11 +65,25 @@ future adapters can consume the same Codex control core.
 
 - Thread-first routing over local Codex App Server.
 - Global observer for foreign GUI/CLI runs, with polling fallback through `thread/read`.
-- Telegram-origin live current tool rendering from App Server `item/*` events, while foreign GUI/CLI panels stay completed-tool only.
-- Stable visual identity per thread: emoji marker plus project/thread/run chips.
-- Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology with status on the live commentary/final card.
-- Low-noise Telegram notifications: only `New run` (configurable), `[Plan]`, and `[Final]` are audible; live progress and exports are sent silently.
-- Plan Mode starts from Telegram via `/plan` or `/reply --plan`; if a thread remains in Plan Mode, the Plan Final Card offers `Turn off Plan` and `/stop` also arms the next normal turn to leave Plan Mode. `[Plan]` prompt-cards keep reply-first routing and structured buttons when Codex provides choices.
+- One stable Telegram activity card per turn, with a four-second typing grace,
+  four-second edit throttle, recent activity history, in-place terminal state,
+  and a de-duplicated audible completion notice when an edit alone cannot notify.
+- User-facing activity aggregation for search, read, edit, diff, format, build,
+  and test operations, with raw tools and output retained in explicit Details.
+- Stable visual identity per thread: the leading emoji identifies the
+  conversation; Chinese text labels express Working, Needs input, Completed,
+  Failed, and Cancelled states consistently.
+- One foreground Telegram session per chat/topic; background progress stays
+  silent and terminal or needs-input notices offer a direct session switch.
+- `/threads` shows current-runtime session titles as clickable buttons and
+  excludes stale cached sessions from isolated Desktop history.
+- `/home` and `/inbox` provide one session entry point plus a durable queue for
+  background sessions needing attention. `/current`, user-owned `/title`,
+  guarded and confirmed `/archive`, and ten-per-page `/unarchive` complete the
+  foreground-session administration flow.
+- Telegram photo input through App Server `localImage`, including caption and
+  caption-free turns on routed threads.
+- Plan Mode starts from Telegram via `/plan` or `/reply --plan`; if a thread remains in Plan Mode, the Plan Final Card offers `退出 Plan` and `/stop` also arms the next normal turn to leave Plan Mode. Structured choices appear on the routeable activity card when Codex provides them.
 - Final Card with Details pagination and on-demand Tools file export.
 - On-demand full log archive from Codex session JSONL.
 - SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
@@ -140,9 +161,11 @@ In Telegram:
 /context
 ```
 
-Start or continue a Codex thread from Codex GUI/CLI. `codex-tg` should create a `New run` card, a `[User]` card, live progress cards, and then send a final answer card with Details while cleaning up transient live cards.
-
-Set `CTR_GO_NOTIFY_NEW_RUN=off` to keep `New run` visible but silent. `[Plan]` prompts and `[Final]` cards still use normal Telegram notifications.
+Start or continue a Codex thread from Telegram or Codex GUI/CLI. `codex-tg`
+first shows Telegram typing, then creates one processing card only when the turn
+lasts beyond four seconds. Activity updates edit that card at a low frequency,
+and completion edits it in place. Long results may follow in separate
+`Codex · 结果` messages; Details and exports remain available for diagnostics.
 
 ## Runtime Commands
 
@@ -172,22 +195,36 @@ go run ./cmd/ctr-go daemon run
 
 Telegram commands:
 
-- `/start`, `/help`
-- `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/show`, `/bind`, `/reply`, `/plan`
+- `/start`, `/home`, `/help`
+- `/current`, `/inbox`, `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/cancel`, `/title`, `/archive`, `/unarchive`, `/show`, `/bind`, `/reply`, `/plan`
 - `/settings`, `/model`, `/effort`
 - `/context`, `/whereami`
 - `/observe all`, `/observe off`
-- `/status`, `/repair`, `/stop`, `/approve`, `/deny`
+- `/status`, `/release`, `/repair`, `/stop`, `/approve`, `/deny`
+
+`/show` and observer-only tracking are read-only. `/bind` and `由 TG 接管` acquire
+and retain the Telegram writer, including across repair and restart. If another
+Codex client owns it, Telegram keeps the route but does not queue messages or
+start a parallel turn. While TG owns a thread, its session cards show
+`释放 TG 控制`; after work is idle, that button or `/release` safely releases
+all writers held by the current Telegram live session and prevents automatic
+reacquisition until the next bind or Telegram input. The daemon also performs
+the same safe, session-wide release after five minutes without an allowed
+Telegram message or button action. Active turns and pending approval/input defer
+automatic release until the session becomes safe to hand off.
 
 `/projects` opens cached project/workspace navigation sorted by the latest
 thread activity. Codex UI Chats from `Documents/Codex` are grouped under
 `Chats`: the main projects view shows recent Chat previews, `Open Chats` opens
 the full paginated Chat list, and choosing a Chat opens and binds its thread.
 Use `New thread` in a normal project menu to create a new thread in that
-project cwd. Use `/newchat <prompt>` to create a Codex UI Chat under
-`Documents/Codex/<date>/<prompt-slug>`. Use `/newthread <prompt>` when you need
-a thread without choosing a project or creating a Chat folder; App Server may
-still attach the daemon default cwd.
+project cwd. Send `/newchat`, enter a title, and then enter the first prompt to
+create a Codex UI Chat under `Documents/Codex/<date>/<title-slug>`, or keep using
+the one-line `/newchat <prompt>` form. `/newthread` provides the same
+title-then-prompt flow without choosing a project or creating a Chat folder;
+`/newthread <prompt>` remains supported. Send `/cancel` while either flow is
+waiting to discard it. App Server may still attach the daemon default cwd to
+`/newthread` threads.
 
 ## Configuration
 
@@ -196,6 +233,7 @@ Primary environment variables:
 - `CTR_GO_HOME`
 - `CTR_GO_CONFIG` (`~/.codex-tg/config.env` by default)
 - `CTR_GO_CODEX_BIN`
+- `CTR_GO_CODEX_HOME` (optional isolated `CODEX_HOME` for spawned App Server processes; use this to keep Telegram sessions separate from Codex Desktop)
 - `CTR_GO_APP_SERVER_LISTEN`
 - `CTR_GO_TELEGRAM_BOT_TOKEN`
 - `CTR_GO_ALLOWED_USER_IDS`
@@ -214,6 +252,13 @@ Primary environment variables:
 - `CTR_GO_ATTACH_REFRESH_SECONDS`
 - `CTR_GO_DELIVERY_RETRY_SECONDS`
 - `CTR_GO_DELIVERY_MAX_ATTEMPTS`
+
+`CTR_GO_CODEX_HOME` changes only the environment of App Server children. The
+daemon, Desktop app, and parent shell are left unchanged. Do not link or copy
+session databases, `state_*.sqlite`, thread history, writer locks, or runtime
+caches between this directory and a Desktop Codex home. Share selected static
+resources such as `skills`, plugins, and global instructions with filesystem
+links, and use an independent application-level store for durable shared memory.
 
 Compatibility fallbacks:
 

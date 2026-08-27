@@ -38,6 +38,15 @@ MCP, app, config, filesystem, command, review, and realtime surfaces.
 - Spawned stdio App Server remains supported. Future work may prepare `unix://`
   and `app-server proxy` transports to decouple daemon lifecycle from Codex
   session lifecycle.
+- A channel adapter may scope spawned App Server children to an adapter-private
+  `CODEX_HOME`. `CTR_GO_CODEX_HOME` provides that boundary for Telegram without
+  mutating the daemon or operator-shell environment.
+- Client runtime state is private by default. Desktop and Telegram must not
+  share session directories, state/thread-history SQLite files, writer locks,
+  or runtime caches. Selected static resources (skills, plugins, and global
+  instructions) may be shared through explicit filesystem links. Durable
+  cross-client memory requires a separate application-level store rather than
+  linked Codex runtime databases.
 - Session JSONL remains out of live UI/control state. It may be used only for
   explicit exports and diagnostics, preserving ADR-013.
 
@@ -50,6 +59,9 @@ MCP, app, config, filesystem, command, review, and realtime surfaces.
 - Telegram behavior remains protected by its existing contracts and tests.
 - Router-agent and voice-assistant work should consume the control core instead
   of copying Telegram-specific routing logic.
+- Operators can isolate Desktop and Telegram session visibility while retaining
+  a deliberately shared capability layer. Authentication may be provisioned in
+  each private home, but mutable runtime databases remain isolated.
 - Public positioning should describe `codex-tg` as a local Codex control layer
   with a Telegram adapter, not as a replacement for official Remote Connections.
 

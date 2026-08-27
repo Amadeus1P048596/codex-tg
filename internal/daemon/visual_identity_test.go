@@ -7,7 +7,66 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
+
+func TestVisualCardHeaderPrioritizesTitleRoleStatusAndTiming(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	assignment, err := json.Marshal(visualMarkerAssignment{Marker: "🟢", ExpiresAtUnix: time.Now().UTC().Add(time.Hour).Unix()})
+	if err != nil {
+		t.Fatalf("Marshal marker assignment failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, visualMarkerStatePrefix+"01a00329-thread", string(assignment)); err != nil {
+		t.Fatalf("SetState marker failed: %v", err)
+	}
+	header := service.visualCardHeader(ctx, "Final", model.Thread{
+		ID:          "01a00329-thread",
+		Title:       "Investigate NAS OpenList sync",
+		ProjectName: "referenced-chat",
+	}, "01a01fc5-turn", "completed", "Run duration: 1m 19s")
+
+	wantText := strings.Join([]string{
+		"🟢 Investigate NAS OpenList sync",
+		"🤖 [Final] · ✅ Status: completed · ⏱ Run duration: 1m 19s",
+		"referenced-chat · T:01a00329 · R:01a01fc5",
+	}, "\n")
+	if header.Text != wantText {
+		t.Fatalf("header.Text = %q, want %q", header.Text, wantText)
+	}
+	for _, want := range []struct {
+		entityType string
+		text       string
+	}{
+		{entityType: "bold", text: "Investigate NAS OpenList sync"},
+		{entityType: "bold", text: "🤖 [Final]"},
+		{entityType: "bold", text: "✅ Status: completed"},
+		{entityType: "bold", text: "⏱ Run duration: 1m 19s"},
+		{entityType: "code", text: "referenced-chat · T:01a00329 · R:01a01fc5"},
+	} {
+		if !visualHeaderHasEntity(header, want.entityType, want.text) {
+			t.Fatalf("header entities = %#v, want %s entity for %q", header.Entities, want.entityType, want.text)
+		}
+	}
+}
+
+func visualHeaderHasEntity(header visualCardHeaderView, entityType, text string) bool {
+	index := strings.Index(header.Text, text)
+	if index < 0 {
+		return false
+	}
+	wantOffset := visualUTF16Len(header.Text[:index])
+	wantLength := visualUTF16Len(text)
+	for _, entity := range header.Entities {
+		if entity.Type == entityType && entity.Offset == wantOffset && entity.Length == wantLength {
+			return true
+		}
+	}
+	return false
+}
 
 func TestVisualMarkerIsStableForSameThread(t *testing.T) {
 	t.Parallel()

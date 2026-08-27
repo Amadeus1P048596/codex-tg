@@ -153,6 +153,7 @@ func runStatus(cfg config.Config, out io.Writer) error {
 		fmt.Sprintf("Home: %s", cfg.Paths.Home),
 		fmt.Sprintf("DB: %s", cfg.Paths.DBPath),
 		fmt.Sprintf("Codex bin: %s", cfg.CodexBin),
+		fmt.Sprintf("Codex home: %s", formatOptionalValue(cfg.CodexHome, "inherited")),
 		fmt.Sprintf("Telegram configured: %t", strings.TrimSpace(cfg.TelegramBotToken) != ""),
 		fmt.Sprintf("Allowed users: %s", formatIDs(cfg.AllowedUserIDs)),
 		fmt.Sprintf("Allowed chats: %s", formatIDs(cfg.AllowedChatIDs)),
@@ -176,6 +177,13 @@ func runStatus(cfg config.Config, out io.Writer) error {
 	}
 	_, _ = fmt.Fprintln(out, strings.Join(lines, "\n"))
 	return nil
+}
+
+func formatOptionalValue(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func runDoctor(cfg config.Config, out io.Writer) error {

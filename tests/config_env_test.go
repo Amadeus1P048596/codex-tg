@@ -17,6 +17,7 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	isolateLocalConfig(t)
 	t.Setenv("CTR_GO_HOME", `C:\tmp\ctr-go`)
 	t.Setenv("CTR_GO_CODEX_BIN", `C:\tools\codex.exe`)
+	t.Setenv("CTR_GO_CODEX_HOME", `C:\profiles\codex-tg`)
 	t.Setenv("CTR_GO_APP_SERVER_LISTEN", "stdio://")
 	t.Setenv("CTR_GO_TELEGRAM_BOT_TOKEN", "go-token")
 	t.Setenv("CTR_TELEGRAM_BOT_TOKEN", "legacy-token")
@@ -25,6 +26,7 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	t.Setenv("CTR_GO_ALLOWED_CHAT_IDS", "10 20")
 	t.Setenv("CTR_GO_DEFAULT_CWD", `C:\workspace`)
 	t.Setenv("CTR_GO_LOG_ENABLED", "off")
+	t.Setenv("CTR_GO_FULL_ACCESS", "true")
 	t.Setenv("CTR_GO_DIAGNOSTIC_LOGS", "no")
 	t.Setenv("CTR_GO_NOTIFY_NEW_RUN", "off")
 	t.Setenv("CTR_GO_OBSERVER_POLL_SECONDS", "7")
@@ -45,6 +47,9 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	if got, want := cfg.CodexBin, `C:\tools\codex.exe`; got != want {
 		t.Fatalf("CodexBin = %q, want %q", got, want)
 	}
+	if got, want := cfg.CodexHome, `C:\profiles\codex-tg`; got != want {
+		t.Fatalf("CodexHome = %q, want %q", got, want)
+	}
 	if got, want := cfg.TelegramBotToken, "go-token"; got != want {
 		t.Fatalf("TelegramBotToken = %q, want %q", got, want)
 	}
@@ -59,6 +64,9 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	}
 	if cfg.LogEnabled {
 		t.Fatal("LogEnabled = true, want false")
+	}
+	if !cfg.FullAccess {
+		t.Fatal("FullAccess = false, want true")
 	}
 	if cfg.DiagnosticLogs {
 		t.Fatal("DiagnosticLogs = true, want false")

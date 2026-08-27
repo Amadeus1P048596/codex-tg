@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -16,8 +17,9 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL     string
+	fileBaseURL string
+	http        *http.Client
 }
 
 func NewClient(token string) *Client {
@@ -28,7 +30,8 @@ func NewClient(token string) *Client {
 		IdleConnTimeout:     90 * time.Second,
 	}
 	return &Client{
-		baseURL: fmt.Sprintf("https://api.telegram.org/bot%s", token),
+		baseURL:     fmt.Sprintf("https://api.telegram.org/bot%s", token),
+		fileBaseURL: fmt.Sprintf("https://api.telegram.org/file/bot%s", token),
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   70 * time.Second,
@@ -60,8 +63,25 @@ type Message struct {
 	From            *User           `json:"from"`
 	Chat            Chat            `json:"chat"`
 	Text            string          `json:"text"`
+	Caption         string          `json:"caption,omitempty"`
+	Photo           []PhotoSize     `json:"photo,omitempty"`
 	Entities        []MessageEntity `json:"entities,omitempty"`
 	ReplyToMessage  *Message        `json:"reply_to_message"`
+}
+
+type PhotoSize struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+type File struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+	FilePath     string `json:"file_path,omitempty"`
 }
 
 type CallbackQuery struct {
@@ -126,6 +146,12 @@ type deleteMessageRequest struct {
 	MessageID int64 `json:"message_id"`
 }
 
+type sendChatActionRequest struct {
+	ChatID          int64  `json:"chat_id"`
+	MessageThreadID int64  `json:"message_thread_id,omitempty"`
+	Action          string `json:"action"`
+}
+
 type getUpdatesRequest struct {
 	Offset         int64    `json:"offset,omitempty"`
 	Timeout        int      `json:"timeout,omitempty"`
@@ -134,6 +160,10 @@ type getUpdatesRequest struct {
 
 type setMyCommandsRequest struct {
 	Commands []BotCommand `json:"commands"`
+}
+
+type getFileRequest struct {
+	FileID string `json:"file_id"`
 }
 
 type answerCallbackQueryRequest struct {
@@ -201,7 +231,10 @@ func (c *Client) SendRenderedMessage(ctx context.Context, chatID, topicID int64,
 		ReplyMarkup:         markup,
 		DisablePreview:      true,
 		DisableNotification: options.Silent,
-		Entities:            toAPIEntities(rendered.Entities),
+		ParseMode:           rendered.ParseMode,
+	}
+	if request.ParseMode == "" {
+		request.Entities = toAPIEntities(rendered.Entities)
 	}
 	if topicID == 0 {
 		request.MessageThreadID = 0
@@ -236,7 +269,10 @@ func (c *Client) EditRenderedMessageText(ctx context.Context, chatID, messageID 
 		Text:           rendered.Text,
 		ReplyMarkup:    markup,
 		DisablePreview: true,
-		Entities:       toAPIEntities(rendered.Entities),
+		ParseMode:      rendered.ParseMode,
+	}
+	if request.ParseMode == "" {
+		request.Entities = toAPIEntities(rendered.Entities)
 	}
 	var message Message
 	if err := c.callJSON(ctx, "editMessageText", request, &message); err != nil {
@@ -250,6 +286,56 @@ func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) err
 		ChatID:    chatID,
 		MessageID: messageID,
 	}, nil)
+}
+
+func (c *Client) SendChatAction(ctx context.Context, chatID, topicID int64, action string) error {
+	request := sendChatActionRequest{
+		ChatID:          chatID,
+		MessageThreadID: topicID,
+		Action:          strings.TrimSpace(action),
+	}
+	if request.Action == "" {
+		request.Action = "typing"
+	}
+	return c.callJSON(ctx, "sendChatAction", request, nil)
+}
+
+func (c *Client) GetFile(ctx context.Context, fileID string) (*File, error) {
+	var file File
+	if err := c.callJSON(ctx, "getFile", getFileRequest{FileID: strings.TrimSpace(fileID)}, &file); err != nil {
+		return nil, err
+	}
+	return &file, nil
+}
+
+func (c *Client) DownloadFile(ctx context.Context, filePath string, maxBytes int64) ([]byte, error) {
+	filePath = strings.TrimLeft(strings.TrimSpace(filePath), "/\\")
+	if filePath == "" || strings.Contains(filePath, "..") {
+		return nil, errors.New("invalid Telegram file path")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.fileBaseURL, "/")+"/"+strings.ReplaceAll(filePath, "\\", "/"), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("telegram file download returned HTTP %d", response.StatusCode)
+	}
+	if maxBytes <= 0 {
+		maxBytes = 20 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("Telegram file exceeds %d-byte limit", maxBytes)
+	}
+	return data, nil
 }
 
 func (c *Client) SendDocument(ctx context.Context, chatID, topicID int64, document DocumentFile, caption string, markup *InlineKeyboardMarkup, options model.SendOptions) (*Message, error) {

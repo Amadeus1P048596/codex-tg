@@ -7,8 +7,12 @@
 
 - The primary operator surface remains one Telegram DM observer target.
 - Each thread gets a stable emoji marker plus short text chips in every user-facing observer card.
-- The default header shape is:
-  `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`
+- Rendered Markdown cards use a three-row identity hierarchy:
+  - `emoji bold Thread`
+  - `bold Kind/role · bold Status · bold Timing` when those fields apply
+  - `code Project · T:thread · R:run`
+- Plain-text cards, captions, and compatibility surfaces may keep the compact
+  `emoji [Project] [Thread] [T:thread] [R:run] [Kind]` shape.
 - Emoji markers are visual hints only. Routing correctness depends on persisted message routes and callback route tokens, not rendered text.
 - Short `T:` and `R:` chips are copy hints only. They are not route authority and are not sufficient for explicit commands that need the full Codex id.
 - `/context` must show the full bound `Thread ID` when a thread is available.
@@ -24,6 +28,8 @@
 - Renderers must use a shared identity header helper instead of hand-written `[Project] [Thread]` strings.
 - The first release after this ADR may edit existing panels because header hashes change.
 - Tests must assert identity presence by message kind and route metadata, not exact string prefixes like `[Final]`.
+- Tests must assert Telegram entity ranges for the emphasized thread title,
+  role, status, timing, and secondary metadata.
 - Tests must cover full-id access through `/context`, live summary cards, and Final Cards.
 - Live Telegram e2e for UI changes must include at least two parallel Codex threads, so marker/chip separation is verified in the real chat.
 

@@ -169,13 +169,19 @@ def is_bot_message(message, bot) -> bool:
 
 
 def is_final_with_marker(text: str, marker: str) -> bool:
-    return marker in text and "[Final]" in text
+    return marker in text and ("[Final]" in text or "已完成" in text)
 
 
 def has_button(message, text: str) -> bool:
+    aliases = {
+        "Details": {"Details", "📋 详情"},
+        "Back": {"Back", "返回"},
+        "Turn off Plan": {"Turn off Plan", "退出 Plan"},
+    }
+    accepted = aliases.get(text, {text})
     for row in message.buttons or []:
         for button in row:
-            if getattr(button, "text", "") == text:
+            if getattr(button, "text", "") in accepted:
                 return True
     return False
 
@@ -985,14 +991,22 @@ async def newchat_folder_case(client, bot, thread_id: str, stamp: str) -> None:
     newchat_marker = f"OK_NEWCHAT_FOLDER_{stamp}"
     newthread_marker = f"OK_NEWTHREAD_NOCWD_{stamp}"
     before_newchat = time.time()
+    newchat_title = f"tool call {stamp}"
     newchat_prompt = (
-        "/newchat Проверь tool call по погоде. "
         "This is a folder-routing smoke test; do not call external tools. "
         f"Final answer must contain exactly {newchat_marker}."
     )
-    sent_newchat = await client.send_message(bot, newchat_prompt)
-    print(f"SENT case=newchat_folder phase=newchat message_id={sent_newchat.id}", flush=True)
-    final_newchat = await wait_final_message(client, bot, sent_newchat.id, newchat_marker, "newchat_folder")
+    sent_newchat = await client.send_message(bot, "/newchat")
+    await wait_bot_text_after(
+        client, bot, sent_newchat.id, "newchat_folder", lambda text: "标题" in text and "/cancel" in text
+    )
+    sent_newchat_title = await client.send_message(bot, newchat_title)
+    await wait_bot_text_after(
+        client, bot, sent_newchat_title.id, "newchat_folder", lambda text: newchat_title in text and "prompt" in text
+    )
+    sent_newchat_prompt = await client.send_message(bot, newchat_prompt)
+    print(f"SENT case=newchat_folder phase=newchat_prompt message_id={sent_newchat_prompt.id}", flush=True)
+    final_newchat = await wait_final_message(client, bot, sent_newchat_prompt.id, newchat_marker, "newchat_folder")
     dirs = recent_chat_dirs(root, "tool-call", before_newchat)
     if not dirs:
         raise SystemExit(f"NEWCHAT_FOLDER_MISSING root={root}")
@@ -1007,13 +1021,21 @@ async def newchat_folder_case(client, bot, thread_id: str, stamp: str) -> None:
     )
 
     before_newthread = time.time()
+    newthread_title = f"newthread nocwd {stamp}"
     newthread_prompt = (
-        f"/newthread newthread nocwd {stamp}. "
         f"Final answer must contain exactly {newthread_marker}."
     )
-    sent_newthread = await client.send_message(bot, newthread_prompt)
-    print(f"SENT case=newchat_folder phase=newthread message_id={sent_newthread.id}", flush=True)
-    await wait_final_message(client, bot, sent_newthread.id, newthread_marker, "newchat_folder")
+    sent_newthread = await client.send_message(bot, "/newthread")
+    await wait_bot_text_after(
+        client, bot, sent_newthread.id, "newchat_folder", lambda text: "标题" in text and "/cancel" in text
+    )
+    sent_newthread_title = await client.send_message(bot, newthread_title)
+    await wait_bot_text_after(
+        client, bot, sent_newthread_title.id, "newchat_folder", lambda text: newthread_title in text and "prompt" in text
+    )
+    sent_newthread_prompt = await client.send_message(bot, newthread_prompt)
+    print(f"SENT case=newchat_folder phase=newthread_prompt message_id={sent_newthread_prompt.id}", flush=True)
+    await wait_final_message(client, bot, sent_newthread_prompt.id, newthread_marker, "newchat_folder")
     unexpected_dirs = recent_chat_dirs(root, "newthread-nocwd", before_newthread)
     if unexpected_dirs:
         raise SystemExit(f"NEWTHREAD_CREATED_CHAT_FOLDER dirs={[str(path) for path in unexpected_dirs]}")
@@ -1034,7 +1056,7 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
     since = utc_now()
     prompt = (
         "This is a notification contract smoke test. "
-        "Do not use tools and do not write a plan. "
+        "Run exactly one shell command: sleep 6. Do not write a plan. "
         f"Final answer exactly: {final_marker}"
     )
     sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
@@ -1042,10 +1064,10 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
 
     deadline = time.time() + 180
     seen = set()
-    new_run_id = None
-    commentary_id = None
+    working_id = None
+    completion_notice = None
     final = None
-    while time.time() < deadline and final is None:
+    while time.time() < deadline and (final is None or completion_notice is None):
         await asyncio.sleep(poll_seconds())
         async for message in bot_messages_after(client, bot, sent.id):
             text = (message.raw_text or "").strip()
@@ -1054,22 +1076,20 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
                 seen.add(key)
                 print(f"BOT case=notification_contract phase=run message_id={message.id} preview={preview(text)}", flush=True)
             fail_if_bad_text(text, "notification_contract")
-            if "New run:" in text:
-                new_run_id = message.id
-            if "[commentary]" in text:
-                commentary_id = message.id
+            if "处理中" in text and final_marker not in text:
+                working_id = message.id
             if is_final_with_marker(text, final_marker) and has_button(message, "Details"):
                 final = message
-                break
+            elif final_marker not in text and "已完成" in text and not has_button(message, "Details"):
+                completion_notice = message
     if final is None:
         raise SystemExit(f"FINAL_TIMEOUT case=notification_contract marker={final_marker}")
-    if new_run_id is None:
-        raise SystemExit("NOTIFICATION_CONTRACT_NEW_RUN_MISSING")
-    if commentary_id is None:
-        raise SystemExit("NOTIFICATION_CONTRACT_COMMENTARY_MISSING")
-    if final.id == commentary_id:
-        raise SystemExit("NOTIFICATION_CONTRACT_FINAL_REUSED_COMMENTARY_MESSAGE")
-    await wait_message_deleted(client, bot, commentary_id, "notification_contract")
+    if working_id is None:
+        raise SystemExit("NOTIFICATION_CONTRACT_WORKING_CARD_MISSING")
+    if final.id != working_id:
+        raise SystemExit("NOTIFICATION_CONTRACT_FINAL_DID_NOT_REUSE_WORKING_CARD")
+    if completion_notice is None or completion_notice.id == final.id:
+        raise SystemExit("NOTIFICATION_CONTRACT_COMPLETION_NOTICE_MISSING")
 
     final = await client.get_messages(bot, ids=final.id)
     await final.click(text="Details")
@@ -1078,7 +1098,7 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
         bot,
         final.id,
         "notification_contract",
-        lambda message, text: "[Details]" in text and has_button(message, "Back"),
+        lambda message, text: "详情" in text and has_button(message, "Back"),
     )
     await details.click(text="Back")
     await wait_message_by_id(
@@ -1086,7 +1106,7 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
         bot,
         final.id,
         "notification_contract",
-        lambda message, text: "[Final]" in text and final_marker in text and has_button(message, "Details"),
+        lambda message, text: is_final_with_marker(text, final_marker) and has_button(message, "Details"),
     )
     fail_if_bad_logs(since, thread_id, "notification_contract")
 
@@ -1102,12 +1122,12 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
     )
     sent_plan = await client.send_message(bot, plan_prompt)
     print(f"SENT case=notification_contract phase=plan message_id={sent_plan.id}", flush=True)
-    plan_card = await wait_bot_text_after(
+    plan_card = await wait_bot_message_after(
         client,
         bot,
         sent_plan.id,
         "notification_contract",
-        lambda text: "[Plan]" in text.split("\n", 1)[0],
+        lambda message, text: "需要输入" in text and has_button(message, "Alpha") and has_button(message, "Beta"),
         timeout=160,
     )
     if has_button(plan_card, "Alpha") and has_button(plan_card, "Beta"):

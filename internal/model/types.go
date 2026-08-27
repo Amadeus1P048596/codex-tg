@@ -286,13 +286,16 @@ type MessageEntity struct {
 }
 
 type RenderedMessage struct {
-	Text     string          `json:"text"`
-	Entities []MessageEntity `json:"entities,omitempty"`
+	Text      string          `json:"text"`
+	Entities  []MessageEntity `json:"entities,omitempty"`
+	ParseMode string          `json:"parse_mode,omitempty"`
+	PlainText string          `json:"-"`
 }
 
 type DetailItem struct {
 	ID              string `json:"id,omitempty"`
 	Kind            string `json:"kind"`
+	ToolKind        string `json:"tool_kind,omitempty"`
 	Phase           string `json:"phase,omitempty"`
 	Text            string `json:"text,omitempty"`
 	Label           string `json:"label,omitempty"`

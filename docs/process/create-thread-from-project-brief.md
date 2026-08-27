@@ -21,7 +21,7 @@ Telegram supports a project-first flow: `/projects` -> project menu -> `New thre
 
 `New thread` arms a one-shot state for the current chat/topic. The next plain-text message calls App Server `thread/start` for that project cwd and then `turn/start` with the message text.
 
-`/newchat <prompt>` creates a dated Codex UI Chat cwd under the configured Chats root, calls App Server `thread/start` with that cwd, and starts the first turn from the prompt. `/newthread <prompt>` calls `thread/start` without a Telegram-selected cwd for cases that should not create a Chat folder; App Server may still attach its default cwd.
+`/newchat` and `/newthread` without arguments collect two separate plain-text messages: an explicit title, then the first prompt. Either stage may be cancelled with `/cancel`; the state survives a daemon restart, expires after 15 minutes, and is isolated by Telegram chat/topic. The title is written to App Server and retained as user-owned Telegram metadata. The one-line `/newchat <prompt>` and `/newthread <prompt>` forms remain supported for backward compatibility and keep their prompt-derived title fallback. Interactive `/newchat` creates a dated Codex UI Chat cwd from the explicit title under the configured Chats root before calling App Server `thread/start`; `/newthread` calls `thread/start` without a Telegram-selected cwd. App Server may still attach its default cwd to the latter.
 
 ## Domain Model
 
@@ -37,7 +37,7 @@ The daemon keeps App Server integration on stdio only:
 
 ## Testing
 
-- Unit tests cover `/projects`, project menu callbacks, one-shot arming, successful create/start, missing thread id, and recoverable `turn/start` failure.
+- Unit tests cover `/projects`, project menu callbacks, `/newchat` and `/newthread` title-then-prompt collection, title write-through, cancellation, expiry, restart persistence, successful create/start, missing thread id, and recoverable `turn/start` failure.
 - Regression tests cover stale Plan choice buttons so old pending input cannot appear under a newer `[commentary]`.
 - Live Telegram E2E must use readback: project menu -> `New thread` -> prompt -> `[Final]`, plus a Plan Mode choice scenario.
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -15,7 +16,10 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
-const telegramMessageLimit = 4096
+const (
+	telegramMessageLimit = 4096
+	telegramPhotoMaxSize = int64(20 << 20)
+)
 
 var telegramBotTokenURLPattern = regexp.MustCompile(`bot[0-9]+:[A-Za-z0-9_-]+`)
 
@@ -124,6 +128,8 @@ func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, m
 		if strings.TrimSpace(rendered.Text) == "" {
 			rendered.Text = " "
 			rendered.Entities = nil
+			rendered.ParseMode = ""
+			rendered.PlainText = " "
 		}
 		var markup *InlineKeyboardMarkup
 		if index == len(messages)-1 {
@@ -133,7 +139,7 @@ func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, m
 		message, err := b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup, options)
 		cancel()
 		if err != nil {
-			rendered.Entities = nil
+			rendered = plainRenderedFallback(rendered)
 			sendCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
 			message, err = b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup, options)
 			cancel()
@@ -163,6 +169,8 @@ func (b *Bot) EditRenderedMessage(ctx context.Context, chatID, topicID, messageI
 	if strings.TrimSpace(rendered.Text) == "" {
 		rendered.Text = " "
 		rendered.Entities = nil
+		rendered.ParseMode = ""
+		rendered.PlainText = " "
 	}
 	editCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	_, err := b.client.EditRenderedMessageText(editCtx, chatID, messageID, rendered, toInlineKeyboard(buttons))
@@ -170,7 +178,7 @@ func (b *Bot) EditRenderedMessage(ctx context.Context, chatID, topicID, messageI
 	if err == nil {
 		return nil
 	}
-	rendered.Entities = nil
+	rendered = plainRenderedFallback(rendered)
 	editCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
 	_, fallbackErr := b.client.EditRenderedMessageText(editCtx, chatID, messageID, rendered, toInlineKeyboard(buttons))
 	cancel()
@@ -178,6 +186,21 @@ func (b *Bot) EditRenderedMessage(ctx context.Context, chatID, topicID, messageI
 		return errors.Join(err, fallbackErr)
 	}
 	return nil
+}
+
+func (b *Bot) SendChatAction(ctx context.Context, chatID, topicID int64, action string) error {
+	actionCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return b.client.SendChatAction(actionCtx, chatID, topicID, action)
+}
+
+func plainRenderedFallback(rendered model.RenderedMessage) model.RenderedMessage {
+	if strings.TrimSpace(rendered.PlainText) != "" {
+		rendered.Text = rendered.PlainText
+	}
+	rendered.Entities = nil
+	rendered.ParseMode = ""
+	return rendered
 }
 
 func (b *Bot) SendDocument(ctx context.Context, chatID, topicID int64, fileName, filePath, caption string, options model.SendOptions) (int64, error) {
@@ -225,18 +248,112 @@ func (b *Bot) handleUpdate(ctx context.Context, update Update) error {
 }
 
 func (b *Bot) handleMessage(ctx context.Context, message Message) error {
-	if message.From == nil || strings.TrimSpace(message.Text) == "" {
+	if message.From == nil {
+		return nil
+	}
+	text := strings.TrimSpace(firstNonEmptyTelegram(message.Text, message.Caption))
+	if text == "" && len(message.Photo) == 0 {
 		return nil
 	}
 	replyTo := int64(0)
 	if message.ReplyToMessage != nil {
 		replyTo = message.ReplyToMessage.MessageID
 	}
-	response, err := b.service.HandleMessage(ctx, message.Chat.ID, message.MessageThreadID, message.From.ID, message.Text, replyTo)
+	localImages, err := b.downloadMessagePhotos(ctx, message.Photo)
+	if err != nil {
+		return b.sendFailureMessage(ctx, message.Chat.ID, message.MessageThreadID, err)
+	}
+	defer removeTelegramTempFiles(localImages)
+	response, err := b.service.HandleMessageWithLocalImages(ctx, message.Chat.ID, message.MessageThreadID, message.From.ID, text, localImages, replyTo)
 	if err != nil {
 		return b.sendFailureMessage(ctx, message.Chat.ID, message.MessageThreadID, err)
 	}
 	return b.deliverDirectResponse(ctx, message.Chat.ID, message.MessageThreadID, response)
+}
+
+func (b *Bot) downloadMessagePhotos(ctx context.Context, photos []PhotoSize) ([]string, error) {
+	photo, ok := largestTelegramPhoto(photos)
+	if !ok {
+		return nil, nil
+	}
+	if photo.FileSize > telegramPhotoMaxSize {
+		return nil, fmt.Errorf("Telegram photo exceeds the %d MiB input limit", telegramPhotoMaxSize>>20)
+	}
+	fileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	file, err := b.client.GetFile(fileCtx, photo.FileID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Telegram photo: %w", err)
+	}
+	if file == nil || strings.TrimSpace(file.FilePath) == "" {
+		return nil, errors.New("Telegram returned no file path for the photo")
+	}
+	if file.FileSize > telegramPhotoMaxSize {
+		return nil, fmt.Errorf("Telegram photo exceeds the %d MiB input limit", telegramPhotoMaxSize>>20)
+	}
+	data, err := b.client.DownloadFile(fileCtx, file.FilePath, telegramPhotoMaxSize)
+	if err != nil {
+		return nil, fmt.Errorf("download Telegram photo: %w", err)
+	}
+	directory := filepath.Join(b.cfg.Paths.DataDir, "telegram-inputs")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, err
+	}
+	temp, err := os.CreateTemp(directory, "telegram-photo-*.jpg")
+	if err != nil {
+		return nil, err
+	}
+	path := temp.Name()
+	cleanup := func() {
+		_ = temp.Close()
+		_ = os.Remove(path)
+	}
+	if err := temp.Chmod(0o600); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if _, err := temp.Write(data); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return []string{path}, nil
+}
+
+func largestTelegramPhoto(photos []PhotoSize) (PhotoSize, bool) {
+	var selected PhotoSize
+	found := false
+	for _, photo := range photos {
+		if strings.TrimSpace(photo.FileID) == "" {
+			continue
+		}
+		if !found || int64(photo.Width)*int64(photo.Height) > int64(selected.Width)*int64(selected.Height) ||
+			(photo.Width == selected.Width && photo.Height == selected.Height && photo.FileSize > selected.FileSize) {
+			selected = photo
+			found = true
+		}
+	}
+	return selected, found
+}
+
+func removeTelegramTempFiles(paths []string) {
+	for _, path := range paths {
+		if strings.TrimSpace(path) != "" {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func firstNonEmptyTelegram(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (b *Bot) handleCallback(ctx context.Context, callback CallbackQuery) error {
@@ -305,27 +422,35 @@ func (b *Bot) sendFailureMessage(ctx context.Context, chatID, topicID int64, cau
 
 func defaultCommands() []BotCommand {
 	return []BotCommand{
-		{Command: "start", Description: "Bridge status and quick help"},
-		{Command: "help", Description: "Command list"},
-		{Command: "status", Description: "Daemon and routing status"},
-		{Command: "threads", Description: "List cached Codex threads"},
-		{Command: "projects", Description: "List cached projects"},
-		{Command: "newchat", Description: "Start a new Codex UI Chat"},
-		{Command: "newthread", Description: "Start without project selection"},
-		{Command: "show", Description: "Show a thread card"},
-		{Command: "bind", Description: "Bind this chat to a thread"},
-		{Command: "reply", Description: "Send input to a thread"},
-		{Command: "plan", Description: "Start Plan Mode in a thread"},
-		{Command: "settings", Description: "Show Codex model settings"},
-		{Command: "model", Description: "Choose the Codex model"},
-		{Command: "effort", Description: "Choose reasoning effort"},
-		{Command: "context", Description: "Show current routing context"},
-		{Command: "observe", Description: "Enable or disable observer mode"},
-		{Command: "panelmode", Description: "Switch trio lifecycle mode"},
-		{Command: "repair", Description: "Restart app-server sessions"},
-		{Command: "stop", Description: "Interrupt the active turn"},
-		{Command: "approve", Description: "Approve a pending request"},
-		{Command: "deny", Description: "Decline a pending request"},
+		{Command: "start", Description: "查看连接状态和快捷帮助"},
+		{Command: "home", Description: "打开会话首页"},
+		{Command: "help", Description: "查看命令列表"},
+		{Command: "status", Description: "查看运行和连接状态"},
+		{Command: "current", Description: "确认当前会话"},
+		{Command: "inbox", Description: "查看后台待处理会话"},
+		{Command: "threads", Description: "切换可用会话"},
+		{Command: "projects", Description: "查看项目"},
+		{Command: "newchat", Description: "新建 Codex Chat"},
+		{Command: "newthread", Description: "新建普通会话"},
+		{Command: "cancel", Description: "取消待输入的新建请求"},
+		{Command: "title", Description: "修改当前会话标题"},
+		{Command: "archive", Description: "归档当前会话"},
+		{Command: "unarchive", Description: "恢复已归档会话"},
+		{Command: "show", Description: "显示会话卡片"},
+		{Command: "bind", Description: "由 Telegram 接管会话"},
+		{Command: "reply", Description: "向会话发送内容"},
+		{Command: "plan", Description: "在会话中启动 Plan 模式"},
+		{Command: "settings", Description: "查看 Codex 设置"},
+		{Command: "model", Description: "选择模型"},
+		{Command: "effort", Description: "选择推理强度"},
+		{Command: "context", Description: "查看当前路由上下文"},
+		{Command: "observe", Description: "开启或关闭观察模式"},
+		{Command: "panelmode", Description: "切换卡片生命周期模式"},
+		{Command: "release", Description: "释放空闲会话控制权"},
+		{Command: "repair", Description: "重启会话服务"},
+		{Command: "stop", Description: "停止当前任务"},
+		{Command: "approve", Description: "允许待确认操作"},
+		{Command: "deny", Description: "拒绝待确认操作"},
 	}
 }
 

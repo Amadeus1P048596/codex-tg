@@ -15,7 +15,7 @@ import (
 const (
 	detailsPageSize     = 4
 	detailsToolMaxBytes = 2800
-	staleDetailsText    = "Details panel is stale. Use /show <thread>."
+	staleDetailsText    = "详情卡片已失效，请使用 /show <会话>。"
 )
 
 func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, target model.ObserverTarget, panel *model.ThreadPanel, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) error {
@@ -27,13 +27,28 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	}
 
 	message, buttons, cardHash := s.renderFinalCard(ctx, panel.ID, thread, snapshot)
-	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons, notifySendOptions())
-	if err != nil {
-		return err
+	finalMessageID := panel.SummaryMessageID
+	editedExistingCard := finalMessageID != 0
+	if finalMessageID != 0 {
+		if err := sender.EditRenderedMessage(ctx, target.ChatID, target.TopicID, finalMessageID, message, buttons); err != nil {
+			return fmt.Errorf("edit Telegram working card to final: %w", err)
+		}
+		s.markPanelEdited(panel.ID, s.currentTime())
+	} else {
+		messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons, notifySendOptions())
+		if err != nil {
+			return err
+		}
+		finalMessageID = lastMessageID(messageIDs)
+		if finalMessageID == 0 {
+			return fmt.Errorf("telegram final card send returned no message id")
+		}
+		s.markPanelEdited(panel.ID, s.currentTime())
 	}
-	finalMessageID := lastMessageID(messageIDs)
-	if finalMessageID == 0 {
-		return fmt.Errorf("telegram final card send returned no message id")
+	if editedExistingCard && !finalNeedsSeparateMessage(snapshot.LatestFinalText) {
+		if err := s.sendForegroundTerminalNotice(ctx, sender, target, thread, snapshot); err != nil {
+			return err
+		}
 	}
 	_ = s.store.PutMessageRoute(ctx, model.MessageRoute{
 		ChatID:    target.ChatID,
@@ -44,7 +59,6 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 		EventID:   snapshot.LatestFinalFP,
 		CreatedAt: model.NowString(),
 	})
-	oldSummaryMessageID := panel.SummaryMessageID
 	panel.SummaryMessageID = finalMessageID
 	panel.CurrentTurnID = snapshot.LatestTurnID
 	panel.Status = snapshot.LatestTurnStatus
@@ -55,61 +69,108 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	if err := s.store.UpdateThreadPanelFinalCard(ctx, panel.ID, panel.SummaryMessageID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP, panel.DetailsViewJSON, panel.LastFinalCardHash); err != nil {
 		return err
 	}
-	if oldSummaryMessageID != 0 && oldSummaryMessageID != finalMessageID {
-		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, oldSummaryMessageID)
-	}
-	if panel.RunNoticeMessageID != 0 {
-		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, panel.RunNoticeMessageID)
-	}
-	if panel.ToolMessageID != 0 {
-		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, panel.ToolMessageID)
-	}
-	if panel.OutputMessageID != 0 {
-		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, panel.OutputMessageID)
+	if finalNeedsSeparateMessage(snapshot.LatestFinalText) {
+		fullMessages := renderLongFinalMessages(s.visualMarker(ctx, thread.ID), snapshot.LatestFinalText)
+		if _, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, fullMessages, nil, notifySendOptions()); err != nil {
+			return fmt.Errorf("send full Telegram final: %w", err)
+		}
 	}
 	return nil
 }
 
 func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (model.RenderedMessage, [][]model.ButtonSpec, string) {
+	writerButton := s.callbackButton(ctx, "由 TG 接管", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
+	if s.ownsLiveThread(thread.ID) {
+		writerButton = s.callbackButton(ctx, "释放 TG 控制", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
+	}
 	buttons := [][]model.ButtonSpec{
 		{
-			s.callbackButton(ctx, "Details", "details_open", thread.ID, snapshot.LatestTurnID, "", map[string]any{
+			s.callbackButton(ctx, "📋 详情", "details_open", thread.ID, snapshot.LatestTurnID, "", map[string]any{
 				"panel_id": panelID,
 				"page":     0,
 			}),
-			s.callbackButton(ctx, "Get full log", "get_full_log", thread.ID, snapshot.LatestTurnID, "", nil),
+			s.callbackButton(ctx, "📄 完整日志", "get_full_log", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
 		{
-			s.callbackButton(ctx, "Show", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
-			s.callbackButton(ctx, "Bind here", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil),
+			s.callbackButton(ctx, "显示卡片", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
+			writerButton,
 		},
 	}
 	if s.finalCardShouldShowTurnOffPlan(ctx, thread.ID, snapshot) {
 		buttons = append(buttons, []model.ButtonSpec{
-			s.callbackButton(ctx, "Turn off Plan", "turn_off_plan", thread.ID, snapshot.LatestTurnID, "", map[string]any{
+			s.callbackButton(ctx, "退出 Plan", "turn_off_plan", thread.ID, snapshot.LatestTurnID, "", map[string]any{
 				"panel_id": panelID,
 			}),
 		})
 	}
 	buttons = append(buttons, []model.ButtonSpec{
-		s.callbackButton(ctx, "Get thread id", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
+		s.callbackButton(ctx, "查看会话 ID", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
 	})
-	header := strings.Join([]string{
-		s.visualHeader(ctx, "Final", thread, snapshot.LatestTurnID),
-		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
-	}, "\n")
-	body := strings.TrimSpace(snapshot.LatestFinalText)
-	if line := runTimingFooter(snapshot, time.Now().UTC()); line != "" {
-		if body != "" {
-			body += "\n\n"
-		}
-		body += line
-	}
-	message := renderSingleMarkdownCard(header, body)
+	finalSummary, finalDetails := finalCardContent(snapshot.LatestFinalText)
+	message := renderNotificationCard(notificationCardView{
+		Marker:     s.visualMarker(ctx, thread.ID),
+		Title:      thread.Title,
+		State:      notificationStateForStatus(readableStatus(snapshot.LatestTurnStatus, thread.Status), false),
+		Duration:   runTimingValue(snapshot, time.Now().UTC()),
+		Summary:    finalSummary,
+		Details:    finalDetails,
+		Operations: aggregateActivities(snapshot).Operations,
+		ThreadID:   visualShortID(thread.ID),
+		TurnID:     visualShortID(snapshot.LatestTurnID),
+	})
 	return message, buttons, hashStrings(tgformat.HashRendered(message), flattenButtonSpecs(buttons))
 }
 
+func finalNeedsSeparateMessage(value string) bool {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+	return len([]rune(value)) > 1400 || len(strings.Split(value, "\n")) > 18
+}
+
+func finalCardContent(value string) (string, string) {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+	if value == "" {
+		return "", ""
+	}
+	if !finalNeedsSeparateMessage(value) {
+		return value, ""
+	}
+	paragraph := value
+	if index := strings.Index(paragraph, "\n\n"); index >= 0 {
+		paragraph = paragraph[:index]
+	} else if index := strings.IndexByte(paragraph, '\n'); index >= 0 {
+		paragraph = paragraph[:index]
+	}
+	paragraph = compactActivityCommand(paragraph, 320)
+	return paragraph, "完整结果已单独发送。"
+}
+
+func renderLongFinalMessages(marker, value string) []model.RenderedMessage {
+	header := strings.TrimSpace(marker) + " Codex · 结果"
+	chunks := tgformat.RenderMarkdownWithHeader(header, strings.TrimSpace(value))
+	messages := make([]model.RenderedMessage, 0, len(chunks))
+	for _, chunk := range chunks {
+		messages = append(messages, model.RenderedMessage{
+			Text:      tgformat.RenderedToHTML(chunk),
+			ParseMode: "HTML",
+			PlainText: chunk.Text,
+		})
+	}
+	return messages
+}
+
 func renderSingleMarkdownCard(header, markdown string) model.RenderedMessage {
+	return renderSingleMarkdownCardWithRenderer(header, markdown, func(candidate string) []model.RenderedMessage {
+		return tgformat.RenderMarkdownWithHeader(header, candidate)
+	})
+}
+
+func renderSingleVisualMarkdownCard(header visualCardHeaderView, markdown string) model.RenderedMessage {
+	return renderSingleMarkdownCardWithRenderer(header.Text, markdown, func(candidate string) []model.RenderedMessage {
+		return renderMarkdownWithVisualHeader(header, candidate)
+	})
+}
+
+func renderSingleMarkdownCardWithRenderer(header, markdown string, render func(string) []model.RenderedMessage) model.RenderedMessage {
 	body := strings.TrimSpace(cleanTelegramNilLiteral(markdown))
 	truncated := false
 	for attempts := 0; attempts < 12; attempts++ {
@@ -117,7 +178,7 @@ func renderSingleMarkdownCard(header, markdown string) model.RenderedMessage {
 		if truncated {
 			candidate = strings.TrimSpace(candidate) + "\n\n[Trimmed for Telegram. Use Get full log.]"
 		}
-		messages := tgformat.RenderMarkdownWithHeader(header, candidate)
+		messages := render(candidate)
 		if len(messages) <= 1 {
 			return firstRenderedMessage(messages)
 		}
@@ -256,10 +317,15 @@ func (s *Service) renderDetailsCard(ctx context.Context, panelID int64, thread m
 		totalPages = 1
 	}
 	state.Page = clampInt(state.Page, 0, totalPages-1)
-	segments := []tgformat.Segment{tgformat.Plain(strings.Join([]string{
-		s.visualHeader(ctx, "Details", thread, snapshot.LatestTurnID),
-		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
-	}, "\n"))}
+	header := s.visualCardHeader(
+		ctx,
+		"详情",
+		thread,
+		snapshot.LatestTurnID,
+		readableStatus(snapshot.LatestTurnStatus, thread.Status),
+		runTimingFooter(snapshot, time.Now().UTC()),
+	)
+	segments := []tgformat.Segment{tgformat.Plain(header.Text)}
 
 	if state.ToolMode {
 		index := clampInt(state.CommentaryIndex, 1, maxInt(1, len(sections)))
@@ -279,10 +345,10 @@ func (s *Service) renderDetailsCard(ctx context.Context, panelID int64, thread m
 			for index := start; index < end; index++ {
 				segments = appendDetailSectionSummarySegments(segments, sections[index], detailsItemsForSection(snapshot, sections[index]))
 			}
-			segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\nPage %d/%d", state.Page+1, totalPages)))
+			segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\n第 %d/%d 页", state.Page+1, totalPages)))
 		}
 	}
-	message := firstRenderedMessage(tgformat.RenderSegments(segments, tgformat.TelegramMessageLimit))
+	message := firstRenderedMessage(renderSegmentsWithVisualHeader(header, segments, tgformat.TelegramMessageLimit))
 	buttons := s.detailsButtons(ctx, panelID, thread.ID, snapshot.LatestTurnID, state, len(sections))
 	return message, buttons, hashStrings(tgformat.HashRendered(message), flattenButtonSpecs(buttons))
 }
@@ -343,17 +409,17 @@ func (s *Service) detailsButtons(ctx context.Context, panelID int64, threadID, t
 	nextPayload := map[string]any{"panel_id": panelID, "page": state.Page, "tool_mode": state.ToolMode, "commentary_index": state.CommentaryIndex}
 	rows := [][]model.ButtonSpec{{
 		s.callbackButton(ctx, "<", "details_prev", threadID, turnID, "", prevPayload),
-		s.callbackButton(ctx, "Back", "details_back", threadID, turnID, "", map[string]any{"panel_id": panelID}),
+		s.callbackButton(ctx, "返回", "details_back", threadID, turnID, "", map[string]any{"panel_id": panelID}),
 		s.callbackButton(ctx, ">", "details_next", threadID, turnID, "", nextPayload),
 	}}
 	togglePayload := map[string]any{"panel_id": panelID, "page": state.Page, "tool_mode": state.ToolMode, "commentary_index": state.CommentaryIndex}
 	if state.ToolMode {
 		rows = append(rows, []model.ButtonSpec{
-			s.callbackButton(ctx, "Tool off", "details_tool_toggle", threadID, turnID, "", togglePayload),
-			s.callbackButton(ctx, "Tools file", "details_tools_file", threadID, turnID, "", togglePayload),
+			s.callbackButton(ctx, "隐藏工具", "details_tool_toggle", threadID, turnID, "", togglePayload),
+			s.callbackButton(ctx, "工具记录", "details_tools_file", threadID, turnID, "", togglePayload),
 		})
 	} else {
-		rows = append(rows, []model.ButtonSpec{s.callbackButton(ctx, "Tool on", "details_tool_toggle", threadID, turnID, "", togglePayload)})
+		rows = append(rows, []model.ButtonSpec{s.callbackButton(ctx, "显示工具", "details_tool_toggle", threadID, turnID, "", togglePayload)})
 	}
 	return rows
 }

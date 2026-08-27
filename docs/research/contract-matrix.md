@@ -11,7 +11,9 @@ This file now serves two purposes:
 ## Commands
 
 - `/start`
+- `/home`
 - `/help`
+- `/inbox`
 - `/threads`
 - `/projects`
 - `/show <thread>`
@@ -27,10 +29,12 @@ This file now serves two purposes:
 - `/new <project-key-or-number> <prompt>`
 - `/newchat <prompt>`
 - `/newthread <prompt>`
+- `/newchat` or `/newthread`, followed by a plain-text title and then a distinct prompt; `/cancel` aborts either pending stage
 - `/context`
 - `/whereami`
 - `/observe all|off`
 - `/status`
+- `/release`
 - `/repair`
 - `/stop [thread]`
 - `/approve <request_id>`
@@ -114,15 +118,21 @@ Adapter routing:
 - `/observe all` moves the single global observer target to the current chat/topic.
 - `/observe off` disables global background monitoring.
 - The observer target model is no longer additive `main DM + extra feeds`.
+- `/start` and `/home` open the session hub. `/inbox` is a durable per-target
+  queue of background terminal and needs-input items; switching clears an item.
 - The observer surface is centered around a summary panel keyed by `(chat, project, thread)`.
 - The summary panel owns `Stop` and `Steer`.
-- Tool/output stream messages do not carry buttons.
-- Final answers are delivered separately and expose `Получить полный лог`.
-- Telegram sends normal notifications only for `New run` (configurable through `CTR_GO_NOTIFY_NEW_RUN`), `[Plan]` prompt-cards, and `[Final]`; other bot messages are silent.
-- Plan Mode / waiting-input states create a separate routeable `[Plan]` prompt-card.
-- `[Plan]` buttons are structured-only: they come from Codex `choices/options/suggestions/responses`, never from bridge heuristics.
+- Raw tool/output events are aggregated into the summary panel and do not create
+  separate default messages.
+- The first four seconds use `typing`; surviving turns create one Working card,
+  and active edits have a four-second minimum interval.
+- Final, failure, cancellation, and input-required states edit the same activity
+  card. Long final content may continue in separate `Codex · 结果` messages.
+- Plan Mode / waiting-input states keep the summary card routeable.
+- Plan buttons are structured-only: they come from Codex
+  `choices/options/suggestions/responses`, never from bridge heuristics.
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
-- If a thread remains in Plan Mode, `Turn off Plan` on the Plan Final Card and `/stop <thread>` set a one-shot local reset; the next ordinary Telegram-originated `turn/start` for that thread uses `collaborationMode.mode = default` and then clears the reset.
+- If a thread remains in Plan Mode, `退出 Plan` on the Plan Final Card and `/stop <thread>` set a one-shot local reset; the next ordinary Telegram-originated `turn/start` for that thread uses `collaborationMode.mode = default` and then clears the reset.
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
@@ -131,15 +141,34 @@ Adapter routing:
 - `New thread` creates a one-shot state; the next plain-text message starts a new App Server thread in the selected project cwd and uses that text as the first prompt.
 - `/newchat <prompt>` creates a dated Chat folder under the configured Chats root, calls App Server `thread/start` with that cwd, and uses the prompt as the first turn.
 - `/newthread <prompt>` starts a new App Server thread without a Telegram-selected cwd parameter and uses the prompt as the first turn. It must not create a Chat folder; App Server may still attach the daemon default cwd.
+- When either command omits `<prompt>`, the bridge persists a 15-minute chat/topic-scoped title-then-prompt state. The first plain-text message supplies an explicit App Server title and the second supplies the first turn prompt; `/cancel` clears either stage, and restart does not lose it.
 - `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.
-- All observer/card messages carry a visual identity header: `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`.
-- Emoji markers are stable visual hints; route correctness remains based on DB message routes and callback tokens.
-- Full `thread_id` and `turn_id` are exposed through `/context` and the `Get thread id` summary/Final action; compact `T:`/`R:` chips are not routing authority.
-- Foreign GUI/CLI runs create separate `New run` and `[User]` cards before the live trio.
-- If the prompt is not available when the run is discovered, `[User]` starts as a placeholder and is edited into the real prompt later.
-- Telegram-originated runs create `New run` and the live trio, but do not duplicate the user request as `[User]`.
+- `/bind` and `由 TG 接管` acquire and retain Telegram ownership with
+  `thread/resume`; binding also changes the foreground session. Observer-only
+  tracking remains read-only.
+- Bound writers are reacquired after repair/restart unless a persisted manual-release marker is present.
+- Explicit Telegram input resumes its target just before the write. An active-writer conflict from another Codex client is returned immediately; the input is not queued and no parallel turn is started.
+- `/release` and `释放 TG 控制` fail closed while any thread owned by the current Telegram live-session generation is active, waiting, or unverifiable. When all are idle they persist manual-release markers and replace only the live session; polling remains connected and cards return to `由 TG 接管`.
+- Five minutes without an allowed Telegram message or callback invokes that same fail-closed session release. Allowed Telegram activity resets the timer, including when it races with an automatic release check.
+- Activity cards carry visual identity. The leading emoji is the stable
+  conversation marker, followed by Codex and a textual state; short `T:`/`R:`
+  ids are low-weight bottom metadata.
+- Emoji markers are identity hints, not state icons; route correctness remains
+  based on DB message routes and callback tokens.
+- Full `thread_id` and `turn_id` are exposed through `/context` and the
+  `查看会话 ID` summary/final action; compact `T:`/`R:` chips are not routing authority.
+- `/title` marks its value as user-owned, so automatic runtime refreshes cannot
+  replace it. `/archive` blocks active/input-waiting sessions and requires
+  confirmation only for an archivable session. Restore success offers a switch action.
+- On Windows, codex-tg may normalize an affected target's extended drive-path
+  prefix immediately before `thread/archive`; App Server still owns the archive
+  move and state transition.
+- Raw events are de-duplicated and prioritized into at most three recent
+  activities. Fast incidental tools usually contribute only to the operation count.
+- Telegram photos on routed threads use the largest available size and App
+  Server `localImage`; they do not create a separate receipt card.
 - Telegram-visible text must never render literal `"<nil>"`. Missing, null, empty, or nil-like App Server fields are treated as absent and must be cleaned before Markdown/entity conversion.
 
 ## Callback / button surface from the oracle
@@ -204,7 +233,7 @@ Additional route rules:
 - real `request_id` Plan answers use App Server server-request response; synthetic Plan answers use `turn/steer`
 - `/reply --plan`, `/plan`, and `/plan_mode` carry an explicit Plan Mode start intent when they create a new turn
 - Hidden `/reply --default` and `/default` fallback paths may still carry an explicit Default Mode start intent, but they are not advertised in the public command menu.
-- `Turn off Plan` and `/stop` carry a one-shot Default Mode reset intent for the next ordinary turn, not for the current callback/stop action itself.
+- `退出 Plan` and `/stop` carry a one-shot Default Mode reset intent for the next ordinary turn, not for the current callback/stop action itself.
 
 ## Observer targets
 
@@ -294,7 +323,7 @@ Plan prompt payload fields:
 - `/context` must describe the active tuple of chat/project/thread or the lack of one
 - polling fallback must emit progress/final/completion for foreign threads
 - stale live-only assumptions must not suppress polling fallback
-- repair must recreate app-server sessions and resume tracked threads without manual route surgery
+- repair must recreate app-server sessions, resume bound writers unless manually released, and keep observer-only tracking read-only
 - observer delivery must remain durable across daemon restart
 - summary panels must be stable per `(chat, project, thread)` instead of spamming a new actionable message for every event
 - waiting Plan prompts must be visible as `[Plan]` messages and answerable by Telegram Reply

@@ -159,6 +159,69 @@ func TestClientDeleteMessageSendsExpectedJSON(t *testing.T) {
 	}
 }
 
+func TestClientSendChatActionTargetsTopic(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sendChatAction" {
+			t.Fatalf("path = %q, want /sendChatAction", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll failed: %v", err)
+		}
+		if err := json.Unmarshal(body, &captured); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	if err := client.SendChatAction(context.Background(), 42, 9, "typing"); err != nil {
+		t.Fatalf("SendChatAction failed: %v", err)
+	}
+	if captured["chat_id"] != float64(42) || captured["message_thread_id"] != float64(9) || captured["action"] != "typing" {
+		t.Fatalf("request = %#v, want chat/topic typing action", captured)
+	}
+}
+
+func TestClientGetsAndDownloadsTelegramFileWithLimit(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/getFile":
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"photo-1","file_size":4,"file_path":"photos/photo-1.jpg"}}`))
+		case "/files/photos/photo-1.jpg":
+			_, _ = w.Write([]byte("JPEG"))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	client.fileBaseURL = server.URL + "/files"
+	file, err := client.GetFile(context.Background(), "photo-1")
+	if err != nil {
+		t.Fatalf("GetFile failed: %v", err)
+	}
+	if file.FilePath != "photos/photo-1.jpg" || file.FileSize != 4 {
+		t.Fatalf("file = %#v", file)
+	}
+	data, err := client.DownloadFile(context.Background(), file.FilePath, 4)
+	if err != nil || string(data) != "JPEG" {
+		t.Fatalf("DownloadFile data=%q err=%v", data, err)
+	}
+	if _, err := client.DownloadFile(context.Background(), file.FilePath, 3); err == nil {
+		t.Fatal("DownloadFile accepted data above the byte limit")
+	}
+}
+
 func TestClientSendRenderedMessageUsesEntitiesWithoutParseMode(t *testing.T) {
 	t.Parallel()
 
@@ -284,6 +347,36 @@ func TestClientEditRenderedMessageTextUsesEntitiesWithoutParseMode(t *testing.T)
 	}
 	if entities, ok := captured["entities"].([]any); !ok || len(entities) != 1 {
 		t.Fatalf("entities = %#v, want one entity", captured["entities"])
+	}
+}
+
+func TestClientSendRenderedMessageUsesExplicitHTMLParseMode(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":82}}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	_, err := client.SendRenderedMessage(context.Background(), 42, 0, model.RenderedMessage{
+		Text:      `✅ <b>Task</b>`,
+		PlainText: `✅ Task`,
+		ParseMode: "HTML",
+	}, nil, model.SendOptions{})
+	if err != nil {
+		t.Fatalf("SendRenderedMessage failed: %v", err)
+	}
+	if got := captured["parse_mode"]; got != "HTML" {
+		t.Fatalf("parse_mode = %#v, want HTML", got)
+	}
+	if _, ok := captured["entities"]; ok {
+		t.Fatalf("entities = %#v, want omitted with HTML parse mode", captured["entities"])
 	}
 }
 

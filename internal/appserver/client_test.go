@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mideco-tech/codex-tg/internal/control"
 )
 
 func TestRPCStringSkipsNilLikeValues(t *testing.T) {
@@ -21,6 +23,51 @@ func TestRPCStringSkipsNilLikeValues(t *testing.T) {
 	}
 	if got := rpcString(float64(42)); got != "42" {
 		t.Fatalf("rpcString(42) = %q, want 42", got)
+	}
+}
+
+func TestAppServerArgsEnableFullAccess(t *testing.T) {
+	got := appServerArgs("stdio://", true)
+	want := []string{
+		"-c", "approval_policy=never",
+		"-c", "sandbox_mode=danger-full-access",
+		"app-server", "--listen", "stdio://",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("appServerArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestAppServerArgsKeepDefaultPermissions(t *testing.T) {
+	got := appServerArgs("stdio://", false)
+	want := []string{"app-server", "--listen", "stdio://"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("appServerArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildCommandScopesCodexHomeToAppServer(t *testing.T) {
+	t.Setenv("CODEX_HOME", `C:\profiles\desktop`)
+	client := NewClient("codex", "stdio://", t.TempDir(), time.Second, ClientOptions{
+		CodexHome: `C:\profiles\telegram`,
+	})
+
+	cmd, err := client.buildCommand()
+	if err != nil {
+		t.Fatalf("buildCommand failed: %v", err)
+	}
+	values := map[string][]string{}
+	for _, pair := range cmd.Env {
+		key, value, ok := strings.Cut(pair, "=")
+		if ok {
+			values[strings.ToUpper(key)] = append(values[strings.ToUpper(key)], value)
+		}
+	}
+	if got := values["CODEX_HOME"]; len(got) != 1 || got[0] != `C:\profiles\telegram` {
+		t.Fatalf("CODEX_HOME entries = %#v, want isolated child value", got)
+	}
+	if got := os.Getenv("CODEX_HOME"); got != `C:\profiles\desktop` {
+		t.Fatalf("parent CODEX_HOME = %q, want unchanged desktop value", got)
 	}
 }
 
@@ -124,6 +171,26 @@ func TestTurnStartParamsIncludesCollaborationMode(t *testing.T) {
 	}
 }
 
+func TestTurnStartInputParamsIncludesTextAndLocalImage(t *testing.T) {
+	params, err := turnStartInputParams("thread-1", []control.UserInput{
+		{Type: "text", Text: "看一下这张图"},
+		{Type: "localImage", Path: `C:\runtime\telegram-image.jpg`},
+	}, `C:\project`, TurnStartOptions{})
+	if err != nil {
+		t.Fatalf("turnStartInputParams failed: %v", err)
+	}
+	inputs, ok := params["input"].([]map[string]any)
+	if !ok || len(inputs) != 2 {
+		t.Fatalf("input = %#v, want text + localImage", params["input"])
+	}
+	if inputs[0]["type"] != "text" || inputs[0]["text"] != "看一下这张图" {
+		t.Fatalf("text input = %#v", inputs[0])
+	}
+	if inputs[1]["type"] != "localImage" || inputs[1]["path"] != `C:\runtime\telegram-image.jpg` {
+		t.Fatalf("image input = %#v", inputs[1])
+	}
+}
+
 func TestTurnStartParamsIncludesDefaultCollaborationMode(t *testing.T) {
 	params, err := turnStartParams("thread-1", "Run it", "/tmp/project", TurnStartOptions{
 		CollaborationMode: "default",
@@ -160,6 +227,20 @@ func TestControlPlaneThreadForkParams(t *testing.T) {
 	params = threadForkParams("thread-1", "")
 	if _, ok := params["cwd"]; ok {
 		t.Fatalf("cwd should be omitted for empty cwd: %#v", params)
+	}
+}
+
+func TestThreadListParamsIncludeArchivedFilterOnlyWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	active := threadListParams(10, "", nil)
+	if _, ok := active["archived"]; ok {
+		t.Fatalf("active params = %#v, archived filter must be omitted", active)
+	}
+	archivedOnly := true
+	archived := threadListParams(10, "cursor-2", &archivedOnly)
+	if archived["archived"] != true || archived["cursor"] != "cursor-2" || archived["limit"] != 10 {
+		t.Fatalf("archived params = %#v", archived)
 	}
 }
 
