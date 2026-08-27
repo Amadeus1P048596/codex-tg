@@ -162,9 +162,11 @@ Adapter routing:
 - `/title` marks its value as user-owned, so automatic runtime refreshes cannot
   replace it. `/archive` blocks active/input-waiting sessions and requires
   confirmation only for an archivable session. Restore success offers a switch action.
-- On Windows, codex-tg may normalize an affected target's extended drive-path
-  prefix immediately before `thread/archive`; App Server still owns the archive
-  move and state transition.
+- On Windows with affected App Server versions, codex-tg tracks resumed threads
+  in the current live generation. Archiving one recycles that generation only
+  after every owned writer is confirmed idle, delegates the archive to the
+  fresh App Server, then restores non-target writers. App Server still owns the
+  archive move and state transition.
 - Raw events are de-duplicated and prioritized into at most three recent
   activities. Fast incidental tools usually contribute only to the operation count.
 - Telegram photos on routed threads use the largest available size and App

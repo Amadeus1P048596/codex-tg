@@ -82,9 +82,38 @@ func TestLiveWindowsThreadArchiveCompat(t *testing.T) {
 		"archive compatibility live test", "danger-full-access", "never"); err != nil {
 		t.Fatal(err)
 	}
+	if err := creator.Close(); err != nil {
+		t.Fatalf("close creator App Server: %v", err)
+	}
 
-	if _, err := creator.ThreadArchive(ctx, threadID); err != nil {
-		t.Fatalf("archive prefixed thread: %v", err)
+	restarted := NewClient(codexBin, "stdio://", workingDir, 30*time.Second, ClientOptions{CodexHome: codexHome})
+	defer restarted.Close()
+	if err := restarted.Start(ctx); err != nil {
+		t.Fatalf("restart App Server: %v", err)
+	}
+	if got := rolloutPathForTest(t, db, threadID); got != rolloutPath {
+		t.Fatalf("rollout path after App Server restart = %q, want %q", got, rolloutPath)
+	}
+	if _, err := restarted.ThreadResume(ctx, threadID, workingDir); err != nil {
+		t.Fatalf("resume prefixed thread: %v", err)
+	}
+	if got := rolloutPathForTest(t, db, threadID); got != prefixed {
+		t.Fatalf("rollout path after resume = %q, want App Server extended path %q", got, prefixed)
+	}
+	if !restarted.ThreadArchiveRequiresFreshSession(threadID) {
+		t.Fatal("resumed Windows thread was not recorded in the fresh-archive cache")
+	}
+	if err := restarted.Close(); err != nil {
+		t.Fatalf("close App Server holding resumed thread: %v", err)
+	}
+
+	admin := NewClient(codexBin, "stdio://", workingDir, 30*time.Second, ClientOptions{CodexHome: codexHome})
+	defer admin.Close()
+	if err := admin.Start(ctx); err != nil {
+		t.Fatalf("start isolated archive App Server: %v", err)
+	}
+	if _, err := admin.ThreadArchive(ctx, threadID); err != nil {
+		t.Fatalf("archive resumed prefixed thread: %v", err)
 	}
 	var archived int
 	var archivedPath string

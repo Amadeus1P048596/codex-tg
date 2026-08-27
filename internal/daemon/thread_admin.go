@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +24,10 @@ var (
 	errThreadAdminNotReady    = errors.New("live app-server session is not ready")
 	errThreadAdminUnsupported = errors.New("live app-server does not support thread administration")
 )
+
+type freshThreadArchiveSession interface {
+	ThreadArchiveRequiresFreshSession(threadID string) bool
+}
 
 func (s *Service) currentTelegramThread(ctx context.Context, chatID, topicID int64) (*model.Thread, error) {
 	threadID, err := s.foregroundThreadID(ctx, chatID, topicID)
@@ -180,11 +185,14 @@ func (s *Service) confirmArchiveThread(ctx context.Context, chatID, topicID, mes
 		s.editThreadAdminResult(ctx, chatID, topicID, messageID, html.EscapeString(response.Text), response.Buttons)
 		return &DirectResponse{CallbackText: "当前任务尚未结束，不能归档。"}, nil
 	}
-	if err := s.callLiveThreadAdmin(ctx, "thread_archive", current.ID, func(requestCtx context.Context, admin control.ThreadAdmin) error {
-		_, callErr := admin.ThreadArchive(requestCtx, current.ID)
-		return callErr
-	}); err != nil {
+	blocked, err := s.archiveLiveThread(ctx, current.ID)
+	if err != nil {
 		return threadAdminFailureResponse(err), nil
+	}
+	if blocked != nil {
+		_ = s.store.ExpireCallbackRoute(ctx, route.Token)
+		s.editThreadAdminResult(ctx, chatID, topicID, messageID, html.EscapeString(blocked.Text), blocked.Buttons)
+		return &DirectResponse{CallbackText: blocked.CallbackText, ThreadID: blocked.ThreadID, TurnID: blocked.TurnID}, nil
 	}
 	current.Archived = true
 	current.UpdatedAt = s.currentTime().Unix()
@@ -359,6 +367,161 @@ func (s *Service) callLiveThreadAdmin(ctx context.Context, operation, threadID s
 	err := call(requestCtx, admin)
 	s.logAppServerCall("ThreadAdmin", started, err, live, lifecycleFields{"operation": operation, "thread_id": threadID})
 	return err
+}
+
+func (s *Service) archiveLiveThread(ctx context.Context, threadID string) (*DirectResponse, error) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+
+	s.mu.RLock()
+	live := s.live
+	connected := s.liveConnected
+	s.mu.RUnlock()
+	if !connected || live == nil {
+		return nil, errThreadAdminNotReady
+	}
+	admin, ok := live.(control.ThreadAdmin)
+	if !ok {
+		return nil, errThreadAdminUnsupported
+	}
+
+	var recycledOwned []string
+	if checker, ok := live.(freshThreadArchiveSession); ok && checker.ThreadArchiveRequiresFreshSession(threadID) {
+		s.mu.Lock()
+		s.liveReleasing = true
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			s.liveReleasing = false
+			s.mu.Unlock()
+		}()
+
+		blocked, owned, err := s.recycleLiveForThreadArchiveLocked(ctx, live, threadID)
+		if blocked != nil || err != nil {
+			return blocked, err
+		}
+		recycledOwned = owned
+		s.mu.RLock()
+		live = s.live
+		connected = s.liveConnected
+		s.mu.RUnlock()
+		if !connected || live == nil {
+			return nil, errThreadAdminNotReady
+		}
+		admin, ok = live.(control.ThreadAdmin)
+		if !ok {
+			return nil, errThreadAdminUnsupported
+		}
+	}
+
+	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+	started := time.Now()
+	_, err := admin.ThreadArchive(requestCtx, threadID)
+	cancel()
+	s.logAppServerCall("ThreadAdmin", started, err, live, lifecycleFields{"operation": "thread_archive", "thread_id": threadID})
+	if len(recycledOwned) > 0 {
+		s.restoreLiveWritersAfterArchiveLocked(ctx, live, recycledOwned, threadID, err == nil)
+	}
+	return nil, err
+}
+
+func (s *Service) recycleLiveForThreadArchiveLocked(ctx context.Context, live Session, targetThreadID string) (*DirectResponse, []string, error) {
+	s.mu.RLock()
+	owned := make([]string, 0, len(s.liveOwnedThreads)+1)
+	seenTarget := false
+	for threadID := range s.liveOwnedThreads {
+		owned = append(owned, threadID)
+		seenTarget = seenTarget || threadID == targetThreadID
+	}
+	s.mu.RUnlock()
+	if !seenTarget {
+		owned = append(owned, targetThreadID)
+	}
+	sort.Strings(owned)
+
+	for _, threadID := range owned {
+		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		payload, err := live.ThreadRead(requestCtx, threadID, true)
+		cancel()
+		if err != nil {
+			return &DirectResponse{
+				Text:         fmt.Sprintf("无法安全确认会话 T:%s 的状态，因此没有重建归档会话。请等待当前任务结束后重试。", visualShortID(threadID)),
+				CallbackText: "无法确认所有会话均已空闲。",
+				ThreadID:     threadID,
+			}, nil, nil
+		}
+		current := appserver.SnapshotFromThreadRead(payload)
+		if snapshotBlocksWriterRelease(current) {
+			label := "当前会话"
+			if threadID != targetThreadID {
+				label = "另一个已加载会话"
+			}
+			return &DirectResponse{
+				Text:         fmt.Sprintf("%s T:%s 仍在运行；为避免中断任务，本次没有归档。请等待完成后重试。", label, visualShortID(threadID)),
+				CallbackText: "有会话仍在运行，暂不能归档。",
+				ThreadID:     threadID,
+				TurnID:       current.LatestTurnID,
+			}, nil, nil
+		}
+	}
+
+	newLive := s.liveFactory()
+	s.mu.Lock()
+	s.live = newLive
+	s.liveConnected = false
+	s.liveEvents = nil
+	s.liveGeneration++
+	s.liveOwnedThreads = map[string]struct{}{}
+	s.writerLastActivity = time.Time{}
+	s.writerAutoReleaseAttempt = time.Time{}
+	s.mu.Unlock()
+	s.logLifecycle("thread_archive_live_recycle_started", lifecycleFields{
+		"thread_id":     targetThreadID,
+		"owned_threads": len(owned),
+	})
+	if err := live.Close(); err != nil {
+		s.logLifecycle("thread_archive_live_recycle_close_failed", lifecycleFields{"thread_id": targetThreadID, "error": err})
+	}
+	s.ensureLiveSessionLocked(ctx)
+	s.mu.RLock()
+	reconnected := s.liveConnected
+	s.mu.RUnlock()
+	if !reconnected {
+		return nil, owned, errThreadAdminNotReady
+	}
+	return nil, owned, nil
+}
+
+func (s *Service) restoreLiveWritersAfterArchiveLocked(ctx context.Context, live Session, owned []string, archivedThreadID string, archived bool) {
+	restored := 0
+	for _, threadID := range owned {
+		if archived && threadID == archivedThreadID {
+			continue
+		}
+		thread, err := s.store.GetThread(ctx, threadID)
+		if err != nil || thread == nil {
+			continue
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		started := time.Now()
+		_, resumeErr := live.ThreadResume(requestCtx, threadID, thread.CWD)
+		cancel()
+		s.logAppServerCall("ThreadResume", started, resumeErr, live, lifecycleFields{
+			"operation": "restore_after_thread_archive",
+			"thread_id": threadID,
+		})
+		if resumeErr != nil {
+			s.logLifecycle("thread_archive_writer_restore_failed", lifecycleFields{"thread_id": threadID, "error": resumeErr})
+			continue
+		}
+		s.markLiveThreadOwned(threadID)
+		restored++
+	}
+	s.logLifecycle("thread_archive_live_recycle_completed", lifecycleFields{
+		"thread_id":        archivedThreadID,
+		"archive_success":  archived,
+		"restored_threads": restored,
+	})
 }
 
 func threadAdminFailureResponse(err error) *DirectResponse {

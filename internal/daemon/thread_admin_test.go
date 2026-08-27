@@ -284,6 +284,100 @@ func TestArchiveCommandRequiresConfirmationThenArchivesCurrentThread(t *testing.
 	}
 }
 
+func TestArchiveResumedThreadRecyclesIdleLiveSessionAndRestoresOtherWriters(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	target := model.Thread{ID: "archive-resumed-thread", Title: "旧会话", CWD: `C:\projects\target`, Status: "idle", UpdatedAt: 10}
+	other := model.Thread{ID: "other-idle-thread", Title: "其他会话", CWD: `C:\projects\other`, Status: "idle", UpdatedAt: 9}
+	for _, thread := range []model.Thread{target, other} {
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, target.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, foregroundThreadStateKey(123456789, 0), target.ID); err != nil {
+		t.Fatalf("SetState foreground failed: %v", err)
+	}
+	oldLive := &stubSession{
+		threadReads: map[string]map[string]any{
+			target.ID: diagnosticThreadReadPayload(target, "target-complete", "completed"),
+			other.ID:  diagnosticThreadReadPayload(other, "other-complete", "completed"),
+		},
+		threadArchiveFresh: map[string]bool{target.ID: true},
+	}
+	newLive := &stubSession{}
+	service.live = oldLive
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{target.ID: {}, other.ID: {}}
+	service.liveFactory = func() Session { return newLive }
+
+	confirm, err := service.handleCommand(ctx, 123456789, 0, "/archive", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/archive) failed: %v", err)
+	}
+	response, err := service.HandleCallback(ctx, 123456789, 0, 77, 123456789, confirm.Buttons[0][0].CallbackData)
+	if err != nil {
+		t.Fatalf("HandleCallback(archive_confirm) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "已归档") {
+		t.Fatalf("response = %#v", response)
+	}
+	if oldLive.closeCalls != 1 || len(oldLive.threadArchiveCalls) != 0 {
+		t.Fatalf("old live close/archive = %d/%#v, want 1/none", oldLive.closeCalls, oldLive.threadArchiveCalls)
+	}
+	if service.live != newLive || len(newLive.threadArchiveCalls) != 1 || newLive.threadArchiveCalls[0] != target.ID {
+		t.Fatalf("fresh live/archive = %p/%#v", service.live, newLive.threadArchiveCalls)
+	}
+	if len(newLive.threadResumeCalls) != 1 || newLive.threadResumeCalls[0].threadID != other.ID {
+		t.Fatalf("restored writer calls = %#v, want only %s", newLive.threadResumeCalls, other.ID)
+	}
+	if service.ownsLiveThread(target.ID) || !service.ownsLiveThread(other.ID) {
+		t.Fatalf("live ownership = %#v, want only other thread", service.liveOwnedThreads)
+	}
+}
+
+func TestArchiveResumedThreadDoesNotRecycleWhileAnotherWriterIsActive(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	target := model.Thread{ID: "archive-resumed-thread", Title: "旧会话", Status: "idle", UpdatedAt: 10}
+	other := model.Thread{ID: "other-active-thread", Title: "运行中的会话", Status: "active", ActiveTurnID: "other-turn", UpdatedAt: 9}
+	for _, thread := range []model.Thread{target, other} {
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, target.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	oldLive := &stubSession{
+		threadReads: map[string]map[string]any{
+			target.ID: diagnosticThreadReadPayload(target, "target-complete", "completed"),
+			other.ID:  diagnosticThreadReadPayload(other, other.ActiveTurnID, "inProgress"),
+		},
+		threadArchiveFresh: map[string]bool{target.ID: true},
+	}
+	service.live = oldLive
+	service.liveConnected = true
+	service.liveOwnedThreads = map[string]struct{}{target.ID: {}, other.ID: {}}
+
+	confirm, err := service.handleCommand(ctx, 123456789, 0, "/archive", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/archive) failed: %v", err)
+	}
+	response, err := service.HandleCallback(ctx, 123456789, 0, 78, 123456789, confirm.Buttons[0][0].CallbackData)
+	if err != nil {
+		t.Fatalf("HandleCallback(archive_confirm) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "仍在运行") {
+		t.Fatalf("response = %#v, want active-writer refusal", response)
+	}
+	if oldLive.closeCalls != 0 || len(oldLive.threadArchiveCalls) != 0 {
+		t.Fatalf("active writer was interrupted: close/archive = %d/%#v", oldLive.closeCalls, oldLive.threadArchiveCalls)
+	}
+}
+
 func TestArchiveCommandBlocksRunningOrWaitingThread(t *testing.T) {
 	t.Parallel()
 

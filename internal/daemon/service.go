@@ -1944,7 +1944,7 @@ func (s *Service) sendInputToThreadTurnInputs(ctx context.Context, chatID, topic
 	releasing := s.liveReleasing
 	s.mu.RUnlock()
 	if releasing {
-		return &DirectResponse{Text: "Telegram 正在重建 live App Server 以释放空闲写入权，请几秒后重试。"}, nil
+		return &DirectResponse{Text: "Telegram 正在安全重建 live App Server，请几秒后重试。"}, nil
 	}
 	if !connected || live == nil {
 		s.logLifecycle("telegram_turn_input_rejected", lifecycleFields{

@@ -45,6 +45,12 @@ writer-handoff primitive for the spawned stdio process.
   ownership set. The read-only poll session remains connected.
 - Release is session-wide because the writer belongs to the spawned App Server
   process. The command does not promise per-thread unloading.
+- On affected Windows App Server versions, `thread/resume` rewrites the stored
+  rollout to an extended drive path and caches it, while `thread/archive` fails
+  on that loaded path. The client tracks resumed thread ids per live generation.
+  Archive recycles that generation only after every owned writer is verified
+  idle, delegates archive to the fresh App Server before any resume, and then
+  restores the non-target writers. An active or unverifiable writer fails closed.
 
 ## Consequences
 

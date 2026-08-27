@@ -272,16 +272,21 @@ Primary tests:
 - `internal/daemon/thread_admin_test.go::TestCurrentCommandShowsForegroundThreadTitleStatusAndShortID`
 - `internal/daemon/thread_admin_test.go::TestArchiveCommandRequiresConfirmationThenArchivesCurrentThread`
 - `internal/daemon/thread_admin_test.go::TestArchiveCommandBlocksRunningOrWaitingThread`
+- `internal/daemon/thread_admin_test.go::TestArchiveResumedThreadRecyclesIdleLiveSessionAndRestoresOtherWriters`
+- `internal/daemon/thread_admin_test.go::TestArchiveResumedThreadDoesNotRecycleWhileAnotherWriterIsActive`
 - `internal/daemon/thread_admin_test.go::TestArchiveConfirmationCanBeCancelledWithoutArchiving`
 - `internal/appserver/thread_archive_compat_test.go::TestThreadArchivePreparesWindowsStateBeforeRPC`
-- `internal/appserver/thread_archive_compat_test.go::TestPrepareThreadArchiveStateNormalizesWindowsExtendedPath`
+- `internal/appserver/thread_archive_compat_test.go::TestThreadResumePreparesWindowsStateBeforeRPC`
+- `internal/appserver/thread_archive_compat_test.go::TestPrepareThreadRolloutStateNormalizesWindowsExtendedPath`
+- `internal/appserver/thread_archive_compat_test.go::TestThreadArchiveFreshSessionCacheResetsWithGeneration`
 - `internal/daemon/thread_admin_test.go::TestUnarchiveListsTenPerPageAndRestoresClickedThread`
 
 Live E2E:
 
 - `go test -tags live_e2e ./internal/appserver -run LiveWindowsThreadArchiveCompat`
-  creates an isolated thread, injects the affected Windows path prefix, and
-  verifies that the real App Server archives it successfully.
+  creates an isolated persisted thread, injects the affected Windows path
+  prefix, resumes it into App Server's in-memory state, and verifies that the
+  real App Server archives it successfully.
 - `internal/daemon/thread_navigation_test.go::TestHomeShowsCurrentSessionAndPersistentInboxCount`
 - `internal/daemon/thread_navigation_test.go::TestStartOpensTheSessionHome`
 - `internal/daemon/thread_navigation_test.go::TestHomeNewSessionChooserArmsTwoStepPromptInPlace`

@@ -5593,6 +5593,7 @@ type stubSession struct {
 	threadResumeCalls         []threadResumeCall
 	threadSetNameCalls        []threadNameCall
 	threadArchiveCalls        []string
+	threadArchiveFresh        map[string]bool
 	threadUnarchiveCalls      []string
 	archivedThreadListCursors []string
 	turnSteerCalls            []turnCall
@@ -5671,6 +5672,9 @@ func (s *stubSession) ThreadSetName(ctx context.Context, threadID, name string) 
 func (s *stubSession) ThreadArchive(ctx context.Context, threadID string) (map[string]any, error) {
 	s.threadArchiveCalls = append(s.threadArchiveCalls, threadID)
 	return map[string]any{}, nil
+}
+func (s *stubSession) ThreadArchiveRequiresFreshSession(threadID string) bool {
+	return s.threadArchiveFresh[threadID]
 }
 func (s *stubSession) ThreadUnarchive(ctx context.Context, threadID string) (map[string]any, error) {
 	s.threadUnarchiveCalls = append(s.threadUnarchiveCalls, threadID)

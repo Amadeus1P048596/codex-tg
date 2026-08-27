@@ -99,6 +99,13 @@ archived threads ten per page; each title is a restore button, with inline
 previous/next navigation. Restore success offers both `切换至该会话` and
 `继续查看归档`.
 
+On affected Windows App Server versions, a resumed idle session is archived
+through a fresh live generation to avoid a cached extended-path failure. The
+daemon first confirms that every writer owned by the old generation is idle,
+archives the target through App Server, and restores the remaining writers. If
+another owned session is active or cannot be verified, archive fails closed and
+does not interrupt it.
+
 ## Photo Input
 
 A pure Telegram photo or photo with a caption is accepted on a routed or

@@ -1,5 +1,19 @@
 # Validation Notes
 
+- 2026-08-27 CST Windows resumed-thread archive validation reproduced the
+  Codex App Server 0.148.0 extended-path cache failure, then replaced the
+  one-shot path rewrite with generation-local prepared/resumed caches and an
+  idle-only live App Server recycle. The recycle leaves the poll session
+  untouched, fails closed if any owned writer is active or unverifiable, and
+  restores other idle writers after the archive attempt. Targeted client and
+  daemon tests, a real isolated-home App Server restart/resume/archive smoke,
+  full `go test ./...`, `go build -buildvcs=false ./...`, targeted `go vet`,
+  `git diff --check`, and the public secret/local-path scan passed. The
+  rollback-capable Windows cutover is detached behind three consecutive idle
+  checks because the validating Telegram turn itself owns the current live
+  writer; it will wait 10 seconds after shutdown before replacement and will
+  preserve the installed daemon if the gate or health checks fail.
+
 - 2026-08-27 CST Telegram table/photo-input validation rewrote GFM pipe tables
   outside fenced code into labeled mobile records across both entity and HTML
   render paths. Successfully dispatched private photo inputs now remain readable

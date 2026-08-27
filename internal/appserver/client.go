@@ -28,6 +28,8 @@ type CollaborationModeOption = control.CollaborationModeOption
 var _ control.ControlPlane = (*Client)(nil)
 var _ control.RichTurns = (*Client)(nil)
 
+var errThreadArchiveRequiresFreshSession = errors.New("resumed Windows thread archive requires a fresh app-server session")
+
 type rpcResponse struct {
 	Result any
 	Error  error
@@ -42,6 +44,9 @@ type Client struct {
 	fullAccess     bool
 
 	startMu        sync.Mutex
+	rolloutPathMu  sync.Mutex
+	preparedPaths  map[string]struct{}
+	resumedPaths   map[string]struct{}
 	mu             sync.Mutex
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
@@ -75,6 +80,8 @@ func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration, op
 		cwd:            cwd,
 		requestTimeout: requestTimeout,
 		fullAccess:     clientOptions.FullAccess,
+		preparedPaths:  map[string]struct{}{},
+		resumedPaths:   map[string]struct{}{},
 		pending:        map[uint64]chan rpcResponse{},
 		serverRequests: map[string]map[string]any{},
 		readerDone:     make(chan struct{}),
@@ -90,6 +97,10 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.started {
 		c.mu.Unlock()
 		return nil
+	}
+	if err := c.preparePersistedThreadRolloutPaths(); err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("prepare persisted thread rollout paths: %w", err)
 	}
 	cmd, err := c.buildCommand()
 	if err != nil {
@@ -359,13 +370,17 @@ func (c *Client) ThreadSetName(ctx context.Context, threadID, name string) (map[
 }
 
 func (c *Client) ThreadArchive(ctx context.Context, threadID string) (map[string]any, error) {
-	if err := c.prepareThreadArchive(threadID); err != nil {
+	if c.ThreadArchiveRequiresFreshSession(threadID) {
+		return nil, errThreadArchiveRequiresFreshSession
+	}
+	if err := c.prepareThreadRolloutPath(threadID); err != nil {
 		return nil, fmt.Errorf("prepare thread archive: %w", err)
 	}
 	result, err := c.Request(ctx, "thread/archive", map[string]any{"threadId": threadID})
 	if err != nil {
 		return nil, err
 	}
+	c.forgetPreparedThreadRolloutPath(threadID)
 	return asMap(result), nil
 }
 
@@ -374,6 +389,7 @@ func (c *Client) ThreadUnarchive(ctx context.Context, threadID string) (map[stri
 	if err != nil {
 		return nil, err
 	}
+	c.forgetPreparedThreadRolloutPath(threadID)
 	return asMap(result), nil
 }
 
@@ -408,6 +424,9 @@ func (c *Client) ThreadRead(ctx context.Context, threadID string, includeTurns b
 }
 
 func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[string]any, error) {
+	if err := c.prepareThreadRolloutPath(threadID); err != nil {
+		return nil, fmt.Errorf("prepare thread resume: %w", err)
+	}
 	params := map[string]any{
 		"threadId":               threadID,
 		"persistExtendedHistory": true,
@@ -419,6 +438,7 @@ func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[st
 	if err != nil {
 		return nil, err
 	}
+	c.markThreadRolloutResumed(threadID)
 	return asMap(result), nil
 }
 
