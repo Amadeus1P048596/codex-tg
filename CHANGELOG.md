@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Clarified and enforced the current deployment boundary: Telegram uses its own
+  App Servers and mutable Codex runtime state rather than sharing the Windows
+  Codex Desktop App Server or session databases.
+- Made new `ctr-go init` and macOS service-install configurations write a
+  dedicated `CTR_GO_CODEX_HOME` by default while preserving existing configs.
+- Renamed Telegram writer actions to describe live-session behavior inside the
+  isolated runtime instead of implying a Desktop-to-Telegram handoff.
+
 ## v0.5.0-amadeus.1 - 2026-08-27
 
 - Reworked Telegram turn rendering around one throttled activity card with a

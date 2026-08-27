@@ -399,7 +399,9 @@ Contract notes:
 - Stale old live-loop closes must not clear newer session state.
 - Repair is serialized with reconcile/startup and is processed before replacement reconcile.
 - Bind acquires a writer; repair/restart reacquire bound writers unless manually released, while observer-only tracking stays read-only.
-- Explicit Telegram writes acquire a writer at dispatch time; another-client writer conflicts fail immediately without queueing or parallel turns.
+- Explicit Telegram writes acquire a writer at dispatch time; unexpected writer
+  conflicts from another connection in the isolated runtime fail immediately
+  without queueing or parallel turns.
 - `/release` and the session-card release button fail closed for active or unverifiable Telegram-owned threads, persist release markers, and otherwise replace only the live session.
 
 ## Transient Interrupted Gating
@@ -529,7 +531,8 @@ Contract notes:
 - App Server `thread/read` snapshots remain the durable source.
 - App Server live item notifications may update snapshot/detail history.
 - Telegram-origin turns may render current command visibility from live `item/started` and `item/updated` only after matching the marked `thread_id + turn_id`.
-- Foreign GUI/CLI runs do not promise authoritative current command visibility.
+- Poll-discovered runs inside the Telegram runtime do not promise authoritative
+  current command visibility.
 - Long-running active runs render elapsed runtime in the Working card; terminal
   cards render total duration in the header.
 - Live tools feed the Activity Aggregator. Fast incidental operations are

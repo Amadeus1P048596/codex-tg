@@ -156,22 +156,29 @@ Creating or editing project work directories is a separate future feature.
 
 After a model or reasoning-effort selection, the menu message is edited into a compact settings summary without inline choice buttons. Use `/settings`, `/model`, or `/effort` to reopen the menus.
 
-## Sharing Threads With Codex Desktop
+## Independent Sessions, Shared Capabilities And Memory
 
-`/show` and observer-only tracking are read-only. `/bind` and `由 TG 接管` are
-explicit ownership actions: Telegram resumes the thread and retains its writer.
-Repair and daemon restart restore that ownership automatically.
+Telegram does not share the Windows Codex Desktop App Server or mutable runtime.
+Its dedicated `CTR_GO_CODEX_HOME` has separate sessions, state databases, writer
+locks, and caches. `/threads` therefore lists only Telegram-runtime history.
 
-If another Codex client owns the writer, Telegram reports the conflict and keeps
-the binding so it can retry acquisition after that client exits. It does not
-queue the user's message or create a parallel turn.
+Static capabilities such as Skills, plugins, packages, and global instructions
+may be shared through explicit filesystem links. Cross-client durable memory uses
+a separate application-level store and contains only user-approved stable facts,
+preferences, and conventions; it does not share conversation history, thread ids,
+runtime state, or secrets.
 
-While Telegram owns the writer, summary and Final cards show `释放 TG 控制`
-instead of `由 TG 接管`. After a Telegram-started turn is idle, use that button or
-`/release` to close Telegram's live writer session. Release applies to all idle
-threads owned by that live session and persists a marker so background refresh
-or restart does not immediately reacquire them. It refuses to run if any owned
-thread is still active, waiting for approval/input, or cannot be verified.
+Inside the Telegram runtime, `/show` and observer-only tracking use the read-only
+poll App Server. `/bind` and `在 TG 中继续` load the thread in the live App Server.
+An unexpected writer conflict from another connection in that isolated runtime is
+reported without queuing the user's message or creating a parallel turn.
+
+While the live App Server owns the writer, summary and Final cards show
+`释放空闲写入权` instead of `在 TG 中继续`. After a Telegram-started turn is idle,
+use that button or `/release` to recycle the live session. Release applies to all
+idle threads owned by that live generation and persists a marker so background
+refresh or restart does not immediately reacquire them. It refuses to run if any
+owned thread is still active, waiting for approval/input, or cannot be verified.
 The daemon invokes the same guarded, session-wide release automatically after
 five minutes without an allowed Telegram message or button action. New Telegram
 activity resets the timer; an active or pending thread delays release until a

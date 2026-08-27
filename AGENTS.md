@@ -42,7 +42,14 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Current runtime state authority is Codex App Server. New control-plane work must preserve App Server authority for interactive threads, turns, approvals, live events, history, and snapshots.
 - Spawned `codex app-server` over stdio remains supported, but ADR-019 allows future `unix://` and `app-server proxy` transport work.
 - Durable identity is `threadId`; Telegram chat/topic is only an input and rendering surface.
-- Live observer events come from the daemon session; foreign GUI/CLI activity must also be covered by polling `thread/read`.
+- Live observer events come from the daemon live session; non-Telegram activity
+  inside the isolated Telegram runtime must also be covered by polling
+  `thread/read`. Windows Codex Desktop uses a separate runtime and is not an
+  observer source.
+- Desktop and Telegram must not share App Server processes, session/history
+  databases, writer locks, or caches. Explicitly linked capabilities and a
+  separate user-approved durable-memory store are allowed; conversation and
+  runtime state are not.
 - App Server session lifecycle transitions must be serialized and generation-aware; stale old-session close/error events must not invalidate newer sessions or create repair loops.
 - Startup must remain non-blocking; never put full thread sync into synchronous startup.
 - SQLite is the local source of truth for bindings, routes, callbacks, panels, observer target, delivery metadata, and daemon state.

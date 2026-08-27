@@ -4,22 +4,24 @@
 
 Create a bot with BotFather and keep the token private.
 
-## 2. Download And Initialize
+## 2. Clone And Initialize
 
-On macOS, download the latest `.pkg` from
-[GitHub Releases](https://github.com/mideco-tech/codex-tg/releases/latest),
-install it, then run:
+This fork release is source-only:
 
 ```powershell
-ctr-go service install --start --start-at-login
-ctr-go doctor
+git clone https://github.com/Amadeus1P048596/codex-tg.git
+cd codex-tg
+go run ./cmd/ctr-go init
+go run ./cmd/ctr-go doctor
 ```
 
-`ctr-go service install` starts a friendly setup wizard when values are not
-provided through flags. It writes `~/.codex-tg/config.env`, creates a user
-LaunchAgent, and starts the daemon when `--start` is present.
+`ctr-go init` writes `~/.codex-tg/config.env` and defaults
+`CTR_GO_CODEX_HOME` to `~/.codex-tg/codex-home`. This keeps Telegram sessions,
+state databases, writer locks, caches, and App Server processes separate from
+Codex Desktop. Provision Codex authentication in that private home before
+starting the daemon.
 
-For archive/manual setup on any OS:
+For manual setup on any OS:
 
 ```powershell
 ctr-go init
@@ -28,10 +30,9 @@ ctr-go daemon run
 ```
 
 Use `CTR_GO_CONFIG` when you want a different config path. Explicit environment
-variables override config file values.
-When your shell uses proxy env such as `HTTPS_PROXY` or `NO_PROXY`,
-`ctr-go service install` preserves those values in the private config so the
-macOS LaunchAgent can reach the same network while keeping the plist limited to
+variables override config file values. On macOS, a source build also provides
+`ctr-go service install`; its wizard writes the same dedicated runtime home and
+preserves proxy env needed by the LaunchAgent while keeping the plist limited to
 `CTR_GO_CONFIG`.
 
 ## Environment-Only Setup
@@ -41,6 +42,7 @@ $env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
 $env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
 $env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
 $env:CTR_GO_CODEX_CHATS_ROOT = "C:\Users\you\Documents\Codex"
+$env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
 # Optional: set to "off" to keep New run visible but silent.
 $env:CTR_GO_NOTIFY_NEW_RUN = "on"
 ```
@@ -66,7 +68,9 @@ In Telegram:
 /projects
 ```
 
-Start or continue a Codex thread from GUI/CLI. The bot should render the run in Telegram.
+Start or continue a thread from Telegram. A CLI explicitly pointed at the same
+Telegram `CODEX_HOME` may also create work for the poll session to discover, but
+Windows Codex Desktop history is intentionally outside this runtime.
 Only `New run`, `[Plan]`, and `[Final]` use normal Telegram notifications. Live progress cards, menus, and exports are sent silently.
 
 Use `/plan` or `/reply --plan` for Plan Mode. If a thread remains in Plan Mode,

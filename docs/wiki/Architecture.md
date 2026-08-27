@@ -30,7 +30,7 @@ local Codex sessions and workspaces
 
 ## Current Runtime
 
-The v0.4 runtime still runs as a Go daemon with:
+The v0.5 runtime runs as a Go daemon with:
 
 - Telegram Bot API long polling;
 - route and callback handling;
@@ -38,9 +38,19 @@ The v0.4 runtime still runs as a Go daemon with:
 - SQLite state;
 - local Codex App Server connectivity.
 
-The current implementation starts `codex app-server` over stdio. That remains
-supported. ADR-019 allows future work to prepare official App Server `unix://`
-and `app-server proxy` transports when they improve lifecycle safety.
+The current implementation starts two `codex app-server` children over stdio in
+a dedicated `CTR_GO_CODEX_HOME`: one live session for writes and events, plus a
+read-only poll session for authoritative reconciliation. These children do not
+reuse the Windows Codex Desktop App Server or its mutable runtime files.
+
+Desktop and Telegram keep separate sessions, state/history SQLite files, writer
+locks, caches, and App Server lifecycles. Explicit links may share static
+capabilities such as Skills, plugins, packages, and global instructions. Durable
+cross-client memory uses a separate application-level store for user-approved
+facts and preferences; it does not link either runtime's built-in memory DB.
+
+ADR-019 allows future work to prepare official App Server `unix://` and
+`app-server proxy` transports when they improve lifecycle safety.
 
 ## Integration Surface
 
@@ -54,9 +64,11 @@ truth in v0.5.
 
 ## Observer Model
 
-Live App Server notifications are used for daemon-owned runs. Foreign GUI/CLI
-runs are covered through bounded `thread/read` polling. Local session JSONL is
-reserved for explicit log exports, not live observer state.
+The live App Server provides notifications for Telegram-started runs. The
+isolated poll App Server covers background or externally initiated work that is
+still inside the Telegram runtime through bounded `thread/read` polling. Windows
+Codex Desktop runs are outside this runtime and are not observed. Local session
+JSONL is reserved for explicit log exports, not live observer state.
 
 ## State
 

@@ -44,11 +44,13 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 	t.Parallel()
 
 	seen := make(map[string]bool)
+	descriptions := make(map[string]string)
 	for _, command := range defaultCommands() {
 		if seen[command.Command] {
 			t.Fatalf("defaultCommands contains duplicate command %q", command.Command)
 		}
 		seen[command.Command] = true
+		descriptions[command.Command] = command.Description
 	}
 	for _, command := range []string{"home", "current", "inbox", "newchat", "newthread", "cancel", "title", "archive", "unarchive", "release"} {
 		if !seen[command] {
@@ -57,6 +59,12 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 	}
 	if seen["default"] {
 		t.Fatal("defaultCommands must not expose hidden /default fallback in the Telegram command menu")
+	}
+	if got := descriptions["bind"]; got != "在 TG 独立会话中继续" {
+		t.Fatalf("/bind description = %q, want isolated-runtime wording", got)
+	}
+	if got := descriptions["release"]; got != "释放空闲 live 写入权" {
+		t.Fatalf("/release description = %q, want live-session wording", got)
 	}
 }
 

@@ -145,12 +145,12 @@ Adapter routing:
 - `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.
-- `/bind` and `由 TG 接管` acquire and retain Telegram ownership with
+- `/bind` and `在 TG 中继续` load and retain the Telegram live writer with
   `thread/resume`; binding also changes the foreground session. Observer-only
   tracking remains read-only.
 - Bound writers are reacquired after repair/restart unless a persisted manual-release marker is present.
-- Explicit Telegram input resumes its target just before the write. An active-writer conflict from another Codex client is returned immediately; the input is not queued and no parallel turn is started.
-- `/release` and `释放 TG 控制` fail closed while any thread owned by the current Telegram live-session generation is active, waiting, or unverifiable. When all are idle they persist manual-release markers and replace only the live session; polling remains connected and cards return to `由 TG 接管`.
+- Explicit Telegram input resumes its target just before the write. An active-writer conflict from another connection in the isolated Telegram runtime is returned immediately; the input is not queued and no parallel turn is started.
+- `/release` and `释放空闲写入权` fail closed while any thread owned by the current Telegram live-session generation is active, waiting, or unverifiable. When all are idle they persist manual-release markers and replace only the live session; polling remains connected and cards return to `在 TG 中继续`.
 - Five minutes without an allowed Telegram message or callback invokes that same fail-closed session release. Allowed Telegram activity resets the timer, including when it races with an automatic release check.
 - Activity cards carry visual identity. The leading emoji is the stable
   conversation marker, followed by Codex and a textual state; short `T:`/`R:`
@@ -264,7 +264,7 @@ Observer/UI v2 presentation contract:
   - is deleted best-effort after finalization
   - uses normal Telegram notification only when `CTR_GO_NOTIFY_NEW_RUN` is enabled
 - user notice:
-  - appears after `New run` for GUI/CLI runs and before summary/tool/output
+  - appears after `New run` for non-Telegram runs inside the TG runtime and before summary/tool/output
   - remains after finalization as the historical request marker
   - may start as a placeholder and edit into the actual prompt
 - summary-panel update:
@@ -321,12 +321,12 @@ Plan prompt payload fields:
 - `/observe off` disables global monitoring
 - `/status` must show readiness, transport, queue, tracked thread count, and current routing
 - `/context` must describe the active tuple of chat/project/thread or the lack of one
-- polling fallback must emit progress/final/completion for foreign threads
+- polling fallback must emit progress/final/completion for poll-discovered TG-runtime threads
 - stale live-only assumptions must not suppress polling fallback
 - repair must recreate app-server sessions, resume bound writers unless manually released, and keep observer-only tracking read-only
 - observer delivery must remain durable across daemon restart
 - summary panels must be stable per `(chat, project, thread)` instead of spamming a new actionable message for every event
 - waiting Plan prompts must be visible as `[Plan]` messages and answerable by Telegram Reply
 - Plan answer buttons must stay scoped to their Plan turn; a stale pending input from an older turn must not be attached to a newer `[commentary]` card
-- late foreign `[User]` prompts must edit the existing placeholder, not append below live trio messages
+- late poll-discovered `[User]` prompts must edit the existing placeholder, not append below live trio messages
 - duplicate live+poll sync must not create multiple `[Plan]` cards for the same prompt fingerprint

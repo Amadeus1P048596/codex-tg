@@ -1,5 +1,15 @@
 # Validation Notes
 
+- 2026-08-27 CST runtime-boundary review confirmed that Windows Codex Desktop
+  and Telegram run separate App Server processes and private mutable
+  `CODEX_HOME` state, while selected capabilities and an application-level
+  user-approved memory store remain shareable. README, current architecture and
+  writer-lifecycle docs, Telegram action copy, and new-install defaults were
+  aligned with that model. Targeted CLI/Telegram/daemon tests, full
+  `go test ./...`, `go build -buildvcs=false ./...`, `git diff --check`, and
+  secret/local scans passed. The installed daemon was not rebuilt or restarted,
+  so real Telegram readback of the renamed buttons remains pending.
+
 - 2026-08-26 CST interactive session creation now collects an explicit title
   before a distinct first prompt for `/newchat` and `/newthread`, persists both
   stages across restart, derives interactive Chat folders from the title, and

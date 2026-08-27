@@ -1944,14 +1944,14 @@ func (s *Service) sendInputToThreadTurnInputs(ctx context.Context, chatID, topic
 	releasing := s.liveReleasing
 	s.mu.RUnlock()
 	if releasing {
-		return &DirectResponse{Text: "Telegram is releasing its writer session. Retry this message in a few seconds."}, nil
+		return &DirectResponse{Text: "Telegram 正在重建 live App Server 以释放空闲写入权，请几秒后重试。"}, nil
 	}
 	if !connected || live == nil {
 		s.logLifecycle("telegram_turn_input_rejected", lifecycleFields{
 			"thread_id": threadID,
 			"reason":    "live_session_not_ready",
 		})
-		return &DirectResponse{Text: "Live app-server session is not ready yet. Try /status or /repair."}, nil
+		return &DirectResponse{Text: "TG live App Server 尚未就绪，请使用 /status 或 /repair。"}, nil
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
@@ -1967,7 +1967,7 @@ func (s *Service) sendInputToThreadTurnInputs(ctx context.Context, chatID, topic
 				"reason":    "writer_owned_by_another_client",
 			})
 			return &DirectResponse{
-				Text:     "Another Codex client currently owns this task's writer. Your Telegram message was not queued, and no parallel turn was started. Finish or release the task in that client, then retry here.",
+				Text:     "隔离 runtime 中另一个 App Server 连接仍持有该会话的 writer；这条 Telegram 消息没有排队，也没有创建并行 turn。请等待该连接释放后重试，必要时使用 /repair。",
 				ThreadID: threadID,
 			}, nil
 		}
@@ -2393,7 +2393,7 @@ func (s *Service) bindThreadForTelegram(ctx context.Context, chatID, topicID int
 	connected := s.liveConnected
 	s.mu.RUnlock()
 	if !connected || live == nil {
-		return &DirectResponse{CallbackText: "已切换，但 TG 控制通道尚未就绪，请使用 /repair。", ThreadID: threadID}, nil
+		return &DirectResponse{CallbackText: "已切换，但 TG live App Server 尚未就绪，请使用 /repair。", ThreadID: threadID}, nil
 	}
 	if !s.ownsLiveThread(threadID) {
 		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
@@ -2406,13 +2406,13 @@ func (s *Service) bindThreadForTelegram(ctx context.Context, chatID, topicID int
 		})
 		if resumeErr != nil {
 			if threadWriterConflict(resumeErr) {
-				return &DirectResponse{CallbackText: "已切换，但另一个 Codex 客户端仍持有控制权。", ThreadID: threadID}, nil
+				return &DirectResponse{CallbackText: "已切换，但隔离 runtime 中另一个 App Server 连接仍持有写入权。", ThreadID: threadID}, nil
 			}
 			return nil, resumeErr
 		}
 		s.markLiveThreadOwned(threadID)
 	}
-	return &DirectResponse{CallbackText: "已切换，TG 现已接管该会话。", ThreadID: threadID}, nil
+	return &DirectResponse{CallbackText: "已切换，TG live App Server 已加载该会话。", ThreadID: threadID}, nil
 }
 
 func (s *Service) releaseTelegramWriters(ctx context.Context) (*DirectResponse, error) {
@@ -2430,7 +2430,7 @@ func (s *Service) releaseTelegramWritersWithIdleGuard(ctx context.Context, idleS
 	s.mu.Lock()
 	if idleSince != nil && (!s.writerLastActivity.Equal(*idleSince) || s.currentTime().Before(idleSince.Add(telegramWriterIdleTimeout))) {
 		s.mu.Unlock()
-		return &DirectResponse{Text: "Telegram activity resumed; automatic writer release was canceled."}, nil
+		return &DirectResponse{Text: "检测到新的 Telegram 操作，已取消自动释放写入权。"}, nil
 	}
 	live := s.live
 	connected := s.liveConnected
@@ -2440,7 +2440,7 @@ func (s *Service) releaseTelegramWritersWithIdleGuard(ctx context.Context, idleS
 	}
 	if len(owned) == 0 {
 		s.mu.Unlock()
-		return &DirectResponse{Text: "Telegram does not currently hold any task writer locks."}, nil
+		return &DirectResponse{Text: "当前 TG live App Server 没有持有任何会话写入权。"}, nil
 	}
 	s.liveReleasing = true
 	s.mu.Unlock()
@@ -2451,18 +2451,18 @@ func (s *Service) releaseTelegramWritersWithIdleGuard(ctx context.Context, idleS
 	}()
 
 	if !connected || live == nil {
-		return &DirectResponse{Text: "Telegram's live App Server is not connected; there is no writer session to release. Use /repair if it does not recover."}, nil
+		return &DirectResponse{Text: "TG live App Server 未连接，没有可释放的写入会话；若未自动恢复，请使用 /repair。"}, nil
 	}
 	for _, threadID := range owned {
 		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 		payload, err := live.ThreadRead(requestCtx, threadID, true)
 		cancel()
 		if err != nil {
-			return &DirectResponse{Text: fmt.Sprintf("Could not safely verify task %s, so no writer was released. Try /status or wait for the current run to finish.", threadID), ThreadID: threadID}, nil
+			return &DirectResponse{Text: fmt.Sprintf("无法安全确认会话 %s 的状态，因此没有释放任何写入权。请查看 /status，或等待当前任务结束。", threadID), ThreadID: threadID}, nil
 		}
 		current := appserver.SnapshotFromThreadRead(payload)
 		if snapshotBlocksWriterRelease(current) {
-			return &DirectResponse{Text: fmt.Sprintf("Task %s is still active in Telegram. No writer was released; wait for completion or use /stop first.", threadID), ThreadID: threadID, TurnID: current.LatestTurnID}, nil
+			return &DirectResponse{Text: fmt.Sprintf("会话 %s 仍在运行，因此没有释放任何写入权。请等待完成，或先使用 /stop。", threadID), ThreadID: threadID, TurnID: current.LatestTurnID}, nil
 		}
 	}
 	for _, threadID := range owned {
@@ -2489,10 +2489,10 @@ func (s *Service) releaseTelegramWritersWithIdleGuard(ctx context.Context, idleS
 	reconnected := s.liveConnected
 	s.mu.RUnlock()
 	if !reconnected {
-		return &DirectResponse{Text: "Telegram writer locks were released, but the new live App Server did not reconnect. Use /repair, then retry.", CallbackText: "TG locks released; live session reconnect failed.", WriterReleased: true}, nil
+		return &DirectResponse{Text: "空闲写入权已释放，但新的 TG live App Server 未能重新连接。请使用 /repair 后重试。", CallbackText: "已释放写入权；live 会话重连失败。", WriterReleased: true}, nil
 	}
 	s.logLifecycle("telegram_writer_release_completed", lifecycleFields{"released_threads": len(owned)})
-	return &DirectResponse{Text: fmt.Sprintf("已释放 %d 个空闲会话的 TG 控制权，Codex Desktop 现在可以打开这些会话。需要时可点击「由 TG 接管」。", len(owned)), CallbackText: "已释放 TG 控制权。", WriterReleased: true}, nil
+	return &DirectResponse{Text: fmt.Sprintf("已释放 %d 个空闲会话的 live 写入权；只读轮询保持连接。需要继续时可点击「在 TG 中继续」。", len(owned)), CallbackText: "已释放空闲写入权。", WriterReleased: true}, nil
 }
 
 func snapshotBlocksWriterRelease(snapshot appserver.ThreadReadSnapshot) bool {
@@ -3485,7 +3485,7 @@ func (s *Service) renderObserverEvent(ctx context.Context, event model.ObserverE
 	buttons := [][]model.ButtonSpec{
 		{
 			s.callbackButton(ctx, "显示卡片", "show_thread", event.ThreadID, event.TurnID, "", nil),
-			s.callbackButton(ctx, "由 TG 接管", "bind_here", event.ThreadID, event.TurnID, "", nil),
+			s.callbackButton(ctx, "在 TG 中继续", "bind_here", event.ThreadID, event.TurnID, "", nil),
 		},
 		{
 			s.callbackButton(ctx, "发送回复", "reply_hint", event.ThreadID, event.TurnID, "", nil),

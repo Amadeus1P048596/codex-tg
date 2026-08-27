@@ -81,6 +81,7 @@ type serviceInstallOptions struct {
 	AllowedChatIDs  string
 	DefaultCWD      string
 	CodexChatsRoot  string
+	CodexHome       string
 	CodexBin        string
 	NotifyNewRun    string
 	CTRGoBinaryPath string
@@ -106,6 +107,7 @@ func parseServiceInstallOptions(args []string) (serviceInstallOptions, error) {
 	fs.StringVar(&opts.AllowedChatIDs, "allowed-chat-ids", "", "allowed Telegram chat ids")
 	fs.StringVar(&opts.DefaultCWD, "default-cwd", "", "default Codex working directory")
 	fs.StringVar(&opts.CodexChatsRoot, "codex-chats-root", "", "Codex UI Chats root")
+	fs.StringVar(&opts.CodexHome, "codex-home", "", "isolated Telegram Codex runtime home")
 	fs.StringVar(&opts.CodexBin, "codex-bin", "", "Codex binary path")
 	fs.StringVar(&opts.NotifyNewRun, "notify-new-run", "", "notify on New run")
 	fs.StringVar(&opts.CTRGoBinaryPath, "ctr-go-bin", opts.CTRGoBinaryPath, "ctr-go binary path for LaunchAgent")
@@ -188,6 +190,7 @@ func runServiceInstall(args []string, in io.Reader, out io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(out, "  Default cwd: %s\n", values["CTR_GO_DEFAULT_CWD"])
 	_, _ = fmt.Fprintf(out, "  Codex Chats root: %s\n", values["CTR_GO_CODEX_CHATS_ROOT"])
+	_, _ = fmt.Fprintf(out, "  Telegram Codex runtime home: %s\n", values["CTR_GO_CODEX_HOME"])
 	_, _ = fmt.Fprintf(out, "  Codex binary: %s\n", values["CTR_GO_CODEX_BIN"])
 	_, _ = fmt.Fprintf(out, "  New run notifications: %s\n", values["CTR_GO_NOTIFY_NEW_RUN"])
 	_, _ = fmt.Fprintln(out, "\nNext steps")
@@ -236,6 +239,7 @@ func collectServiceInstallValues(opts serviceInstallOptions, existing map[string
 	values["CTR_GO_ALLOWED_CHAT_IDS"] = strings.TrimSpace(firstNonEmpty(opts.AllowedChatIDs, existing["CTR_GO_ALLOWED_CHAT_IDS"]))
 	values["CTR_GO_DEFAULT_CWD"] = strings.TrimSpace(firstNonEmpty(opts.DefaultCWD, existing["CTR_GO_DEFAULT_CWD"], cwd))
 	values["CTR_GO_CODEX_CHATS_ROOT"] = strings.TrimSpace(firstNonEmpty(opts.CodexChatsRoot, existing["CTR_GO_CODEX_CHATS_ROOT"], config.DefaultCodexChatsRoot()))
+	values["CTR_GO_CODEX_HOME"] = strings.TrimSpace(firstNonEmpty(opts.CodexHome, existing["CTR_GO_CODEX_HOME"], filepath.Join(config.DefaultPaths().Home, "codex-home")))
 	values["CTR_GO_CODEX_BIN"] = strings.TrimSpace(firstNonEmpty(opts.CodexBin, existing["CTR_GO_CODEX_BIN"], codexBin))
 	values["CTR_GO_NOTIFY_NEW_RUN"] = strings.TrimSpace(firstNonEmpty(opts.NotifyNewRun, existing["CTR_GO_NOTIFY_NEW_RUN"], "true"))
 	values["CTR_GO_CTR_GO_BIN"] = strings.TrimSpace(firstNonEmpty(opts.CTRGoBinaryPath, existing["CTR_GO_CTR_GO_BIN"]))
@@ -261,7 +265,7 @@ func runServiceWizard(values map[string]string, in io.Reader, out io.Writer) (ma
 	fields := []wizardField{
 		{
 			Key:      "CTR_GO_TELEGRAM_BOT_TOKEN",
-			Step:     "1/7",
+			Step:     "1/8",
 			Label:    "Telegram bot token",
 			Help:     "Create it with @BotFather. Example format: 123456789:AA...",
 			Required: true,
@@ -270,7 +274,7 @@ func runServiceWizard(values map[string]string, in io.Reader, out io.Writer) (ma
 		},
 		{
 			Key:      "CTR_GO_ALLOWED_USER_IDS",
-			Step:     "2/7",
+			Step:     "2/8",
 			Label:    "Allowed Telegram user id(s)",
 			Help:     "Only these Telegram users can control the bot. Example: 123456789 or 123,456",
 			Required: true,
@@ -278,14 +282,14 @@ func runServiceWizard(values map[string]string, in io.Reader, out io.Writer) (ma
 		},
 		{
 			Key:      "CTR_GO_ALLOWED_CHAT_IDS",
-			Step:     "3/7",
+			Step:     "3/8",
 			Label:    "Allowed Telegram chat id(s)",
 			Help:     "Optional. Leave empty to allow any chat from the allowed users.",
 			Validate: validateOptionalIDList,
 		},
 		{
 			Key:      "CTR_GO_DEFAULT_CWD",
-			Step:     "4/7",
+			Step:     "4/8",
 			Label:    "Default Codex work directory",
 			Help:     "Used for no-cwd threads and fallback routing.",
 			Required: true,
@@ -293,15 +297,23 @@ func runServiceWizard(values map[string]string, in io.Reader, out io.Writer) (ma
 		},
 		{
 			Key:      "CTR_GO_CODEX_CHATS_ROOT",
-			Step:     "5/7",
+			Step:     "5/8",
 			Label:    "Codex UI Chats root",
 			Help:     "New /newchat folders are created here, usually ~/Documents/Codex.",
 			Required: true,
 			Validate: validateNonEmpty,
 		},
 		{
+			Key:      "CTR_GO_CODEX_HOME",
+			Step:     "6/8",
+			Label:    "Telegram Codex runtime home",
+			Help:     "Keep sessions and mutable runtime state separate from Codex Desktop.",
+			Required: true,
+			Validate: validateNonEmpty,
+		},
+		{
 			Key:      "CTR_GO_CODEX_BIN",
-			Step:     "6/7",
+			Step:     "7/8",
 			Label:    "Codex binary",
 			Help:     "Absolute path is best. The detected default is used when available.",
 			Required: true,
@@ -309,7 +321,7 @@ func runServiceWizard(values map[string]string, in io.Reader, out io.Writer) (ma
 		},
 		{
 			Key:      "CTR_GO_NOTIFY_NEW_RUN",
-			Step:     "7/7",
+			Step:     "8/8",
 			Label:    "Notify on New run",
 			Help:     "Use true/false. Final and Plan prompts still notify by design.",
 			Required: true,
@@ -403,6 +415,7 @@ func validateServiceValues(values map[string]string) (map[string]string, error) 
 		"CTR_GO_ALLOWED_USER_IDS":   "--allowed-user-ids",
 		"CTR_GO_DEFAULT_CWD":        "--default-cwd",
 		"CTR_GO_CODEX_CHATS_ROOT":   "--codex-chats-root",
+		"CTR_GO_CODEX_HOME":         "--codex-home",
 		"CTR_GO_CODEX_BIN":          "--codex-bin",
 		"CTR_GO_NOTIFY_NEW_RUN":     "--notify-new-run",
 		"CTR_GO_CTR_GO_BIN":         "--ctr-go-bin",
@@ -425,6 +438,7 @@ func validateServiceValues(values map[string]string) (map[string]string, error) 
 		{"CTR_GO_ALLOWED_CHAT_IDS", validateOptionalIDList},
 		{"CTR_GO_DEFAULT_CWD", validateDirectory},
 		{"CTR_GO_CODEX_CHATS_ROOT", validateNonEmpty},
+		{"CTR_GO_CODEX_HOME", validateNonEmpty},
 		{"CTR_GO_CODEX_BIN", validateExecutableRef},
 		{"CTR_GO_NOTIFY_NEW_RUN", validateBoolText},
 	}

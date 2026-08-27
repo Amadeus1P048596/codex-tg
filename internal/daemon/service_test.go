@@ -3080,7 +3080,7 @@ func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
 	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-complete", LatestTurnStatus: "completed"}
 
 	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	bindToken := callbackTokenForButton(buttons, "由 TG 接管")
+	bindToken := callbackTokenForButton(buttons, "在 TG 中继续")
 	if bindToken == "" {
 		t.Fatalf("Bind here button missing from %#v", buttons)
 	}
@@ -3088,7 +3088,7 @@ func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleCallback(bind_here) failed: %v", err)
 	}
-	if response == nil || !strings.Contains(response.CallbackText, "已切换") {
+	if response == nil || !strings.Contains(response.CallbackText, "TG live App Server") {
 		t.Fatalf("response = %#v, want bind confirmation", response)
 	}
 	if len(live.threadResumeCalls) != 1 || live.threadResumeCalls[0].threadID != thread.ID {
@@ -3101,15 +3101,34 @@ func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
 		t.Fatal("Bind here did not clear the manual-release marker")
 	}
 	_, ownedButtons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	if callbackTokenForButton(ownedButtons, "释放 TG 控制") == "" {
+	if callbackTokenForButton(ownedButtons, "释放空闲写入权") == "" {
 		t.Fatalf("Release TG lock button missing from %#v", ownedButtons)
 	}
-	if callbackTokenForButton(ownedButtons, "由 TG 接管") != "" {
+	if callbackTokenForButton(ownedButtons, "在 TG 中继续") != "" {
 		t.Fatalf("Bind here remained after TG acquired the writer: %#v", ownedButtons)
 	}
 	_, finalButtons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	if callbackTokenForButton(finalButtons, "释放 TG 控制") == "" {
+	if callbackTokenForButton(finalButtons, "释放空闲写入权") == "" {
 		t.Fatalf("Release TG lock button missing from Final card: %#v", finalButtons)
+	}
+}
+
+func TestObserverCopyDescribesTelegramRuntimeInsteadOfDesktopHandoff(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "observer-copy-thread", Title: "Observer copy"}
+	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-observer-copy", LatestTurnStatus: "completed"}
+
+	notice, _ := service.renderRunNotice(ctx, thread, snapshot, model.PanelSourceGlobalObserver)
+	if !strings.Contains(notice, "Telegram runtime observer") || strings.Contains(notice, "GUI/CLI observer") {
+		t.Fatalf("run notice = %q, want isolated Telegram runtime source", notice)
+	}
+	event := service.renderObserverEvent(ctx, model.ObserverEvent{ThreadID: thread.ID, ThreadTitle: thread.Title, TurnID: snapshot.LatestTurnID})
+	if event == nil || callbackTokenForButton(event.Buttons, "在 TG 中继续") == "" {
+		t.Fatalf("observer event = %#v, want isolated-runtime continuation action", event)
+	}
+	if callbackTokenForButton(event.Buttons, "由 TG 接管") != "" {
+		t.Fatalf("observer event retained Desktop handoff wording: %#v", event.Buttons)
 	}
 }
 
@@ -3128,7 +3147,7 @@ func TestBindHereKeepsRouteAndReportsAnotherWriterConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bindThreadForTelegram failed: %v", err)
 	}
-	if response == nil || !strings.Contains(response.CallbackText, "另一个 Codex 客户端") {
+	if response == nil || !strings.Contains(response.CallbackText, "隔离 runtime") {
 		t.Fatalf("response = %#v, want writer-conflict guidance", response)
 	}
 	binding, err := service.store.GetBinding(ctx, 123456789, 0)
@@ -3157,7 +3176,7 @@ func TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession(t *testing.T
 	service.liveFactory = func() Session { return newLive }
 	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-complete", LatestTurnStatus: "completed"}
 	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	releaseToken := callbackTokenForButton(buttons, "释放 TG 控制")
+	releaseToken := callbackTokenForButton(buttons, "释放空闲写入权")
 	if releaseToken == "" {
 		t.Fatalf("Release TG lock button missing from %#v", buttons)
 	}
@@ -3169,6 +3188,9 @@ func TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession(t *testing.T
 	if response == nil || !strings.Contains(response.CallbackText, "已释放") {
 		t.Fatalf("response = %#v, want release callback confirmation", response)
 	}
+	if strings.Contains(response.Text, "Codex Desktop") || !strings.Contains(response.Text, "只读轮询") {
+		t.Fatalf("response = %#v, want isolated-runtime release guidance", response)
+	}
 	if !service.telegramWriterReleased(ctx, thread.ID) {
 		t.Fatal("release callback did not persist the manual-release marker")
 	}
@@ -3176,7 +3198,7 @@ func TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession(t *testing.T
 		t.Fatalf("live session was not recycled: close=%d live=%p connected=%t", oldLive.closeCalls, service.live, service.liveConnected)
 	}
 	_, releasedButtons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	if callbackTokenForButton(releasedButtons, "由 TG 接管") == "" {
+	if callbackTokenForButton(releasedButtons, "在 TG 中继续") == "" {
 		t.Fatalf("Bind here button missing after release: %#v", releasedButtons)
 	}
 }
@@ -3186,7 +3208,7 @@ func TestSendInputWriterConflictReturnsDirectResponseWithoutQueue(t *testing.T) 
 	ctx := context.Background()
 	thread := model.Thread{
 		ID:          "writer-conflict-thread",
-		Title:       "Desktop owned",
+		Title:       "Conflicting writer",
 		ProjectName: "Codex",
 		CWD:         `C:\Users\you\Projects\Codex`,
 		UpdatedAt:   time.Now().UTC().Unix(),
@@ -3203,8 +3225,8 @@ func TestSendInputWriterConflictReturnsDirectResponseWithoutQueue(t *testing.T) 
 	if err != nil {
 		t.Fatalf("sendInputToThreadTurn failed: %v", err)
 	}
-	if response == nil || !strings.Contains(strings.ToLower(response.Text), "another codex client") || !strings.Contains(strings.ToLower(response.Text), "not queued") {
-		t.Fatalf("response = %#v, want another-client no-queue guidance", response)
+	if response == nil || !strings.Contains(response.Text, "隔离 runtime") || !strings.Contains(response.Text, "没有排队") {
+		t.Fatalf("response = %#v, want isolated-runtime no-queue guidance", response)
 	}
 	if len(live.turnSteerCalls) != 0 || len(live.turnStartCalls) != 0 {
 		t.Fatalf("writer conflict dispatched a turn: steer=%#v start=%#v", live.turnSteerCalls, live.turnStartCalls)
@@ -3226,7 +3248,7 @@ func TestReleaseTelegramWritersRefusesActiveOwnedThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("releaseTelegramWriters failed: %v", err)
 	}
-	if response == nil || !strings.Contains(strings.ToLower(response.Text), "still active") {
+	if response == nil || !strings.Contains(response.Text, "仍在运行") {
 		t.Fatalf("response = %#v, want active-thread refusal", response)
 	}
 	if live.closeCalls != 0 {
@@ -3247,7 +3269,7 @@ func TestReleaseTelegramWritersRefusesUnverifiableOwnedThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("releaseTelegramWriters failed: %v", err)
 	}
-	if response == nil || !strings.Contains(strings.ToLower(response.Text), "could not safely verify") {
+	if response == nil || !strings.Contains(response.Text, "无法安全确认") {
 		t.Fatalf("response = %#v, want unverifiable-thread refusal", response)
 	}
 	if live.closeCalls != 0 {

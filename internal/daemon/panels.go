@@ -447,7 +447,7 @@ func (s *Service) renderRunNotice(ctx context.Context, thread model.Thread, snap
 	source := "Explicit"
 	switch strings.TrimSpace(sourceMode) {
 	case model.PanelSourceGlobalObserver:
-		source = "GUI/CLI observer"
+		source = "Telegram runtime observer"
 	case model.PanelSourceTelegramInput:
 		source = "Telegram"
 	}
@@ -763,9 +763,9 @@ func (s *Service) maybeUpdateRunNotice(ctx context.Context, sender Sender, panel
 
 func (s *Service) renderSummaryPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, pending *model.PendingApproval) (model.RenderedMessage, [][]model.ButtonSpec, string) {
 	pending = pendingForSnapshot(pending, snapshot)
-	writerButton := s.callbackButton(ctx, "由 TG 接管", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
+	writerButton := s.callbackButton(ctx, "在 TG 中继续", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
 	if s.ownsLiveThread(thread.ID) {
-		writerButton = s.callbackButton(ctx, "释放 TG 控制", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
+		writerButton = s.callbackButton(ctx, "释放空闲写入权", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
 	}
 	buttons := [][]model.ButtonSpec{
 		{

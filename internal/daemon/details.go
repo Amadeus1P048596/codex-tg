@@ -79,9 +79,9 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 }
 
 func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (model.RenderedMessage, [][]model.ButtonSpec, string) {
-	writerButton := s.callbackButton(ctx, "由 TG 接管", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
+	writerButton := s.callbackButton(ctx, "在 TG 中继续", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
 	if s.ownsLiveThread(thread.ID) {
-		writerButton = s.callbackButton(ctx, "释放 TG 控制", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
+		writerButton = s.callbackButton(ctx, "释放空闲写入权", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
 	}
 	buttons := [][]model.ButtonSpec{
 		{

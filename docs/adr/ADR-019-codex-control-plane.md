@@ -41,6 +41,9 @@ MCP, app, config, filesystem, command, review, and realtime surfaces.
 - A channel adapter may scope spawned App Server children to an adapter-private
   `CODEX_HOME`. `CTR_GO_CODEX_HOME` provides that boundary for Telegram without
   mutating the daemon or operator-shell environment.
+- New `ctr-go init` and macOS service-install configurations populate that
+  Telegram-private home by default. Existing configs remain compatible and are
+  not silently migrated.
 - Client runtime state is private by default. Desktop and Telegram must not
   share session directories, state/thread-history SQLite files, writer locks,
   or runtime caches. Selected static resources (skills, plugins, and global

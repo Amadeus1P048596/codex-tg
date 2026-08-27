@@ -275,6 +275,10 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	codexHome, err := prompt(reader, out, "Telegram Codex runtime home", filepath.Join(config.DefaultPaths().Home, "codex-home"))
+	if err != nil {
+		return err
+	}
 	selectedCodexBin, err := prompt(reader, out, "Codex binary", codexBin)
 	if err != nil {
 		return err
@@ -290,6 +294,7 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 		"CTR_GO_DEFAULT_CWD":        defaultCWD,
 		"CTR_GO_CODEX_CHATS_ROOT":   chatsRoot,
 		"CTR_GO_CODEX_BIN":          selectedCodexBin,
+		"CTR_GO_CODEX_HOME":         codexHome,
 		"CTR_GO_NOTIFY_NEW_RUN":     notifyNewRun,
 	}
 	if strings.TrimSpace(allowedChats) != "" {

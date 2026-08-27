@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -41,7 +42,9 @@ func TestDiagnosticLoggerHonorsFlags(t *testing.T) {
 func TestRunInitWritesPrivateConfigAndRefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.env")
+	home := filepath.Join(dir, "home")
 	t.Setenv("CTR_GO_CONFIG", configPath)
+	t.Setenv("CTR_GO_HOME", home)
 	token := "123456:abcdefghijklmnopqrstuvwxyz"
 	input := strings.Join([]string{
 		token,
@@ -49,6 +52,7 @@ func TestRunInitWritesPrivateConfigAndRefusesOverwrite(t *testing.T) {
 		"",
 		filepath.Join(dir, "project"),
 		filepath.Join(dir, "chats"),
+		"",
 		"codex",
 		"false",
 		"",
@@ -70,6 +74,7 @@ func TestRunInitWritesPrivateConfigAndRefusesOverwrite(t *testing.T) {
 		`CTR_GO_TELEGRAM_BOT_TOKEN="` + token + `"`,
 		`CTR_GO_ALLOWED_USER_IDS="42"`,
 		`CTR_GO_CODEX_BIN="codex"`,
+		`CTR_GO_CODEX_HOME=` + strconv.Quote(filepath.Join(home, "codex-home")),
 		`CTR_GO_NOTIFY_NEW_RUN="false"`,
 	} {
 		if !strings.Contains(text, want) {
@@ -103,6 +108,7 @@ func TestRunInitForceOverwritesConfig(t *testing.T) {
 		"",
 		filepath.Join(dir, "project"),
 		filepath.Join(dir, "chats"),
+		filepath.Join(dir, "codex-home"),
 		"codex",
 		"true",
 		"",

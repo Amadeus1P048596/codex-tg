@@ -28,11 +28,13 @@ respective owners.
   switching.
 - Adds title-then-prompt session creation, `/current`, `/title`, confirmed
   `/archive`, paginated `/unarchive`, and `/cancel` for pending creation flows.
-- Makes Telegram writer ownership explicit with acquire/release controls,
-  guarded session-wide handoff, and idle automatic release.
+- Makes the Telegram live-session writer lifecycle explicit with guarded
+  acquire/release controls and idle automatic release inside its private runtime.
 - Adds Telegram photo input through App Server `localImage`, isolated spawned
   App Server homes through `CTR_GO_CODEX_HOME`, and Windows archive-path
   compatibility.
+- Uses independent Desktop and Telegram sessions while allowing an explicitly
+  linked capability layer and a separate user-approved durable-memory store.
 - Adds ADRs, feature briefs, contract documentation, and regression tests for
   the new routing, lifecycle, navigation, rendering, and compatibility rules.
 

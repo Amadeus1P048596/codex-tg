@@ -1,11 +1,16 @@
 # codex-tg：通过 Telegram 管理本地 Codex 会话
 
-`codex-tg` 是一个用 Go 编写的本地 Codex 控制平面。它在本机连接
-OpenAI Codex App Server，把 Telegram 变成查看任务进度、切换会话、
-发送后续指令、处理 Plan 输入、审批操作和接收最终结果的远程控制入口。
+`codex-tg` 是一个用 Go 编写的本地 Codex 控制平面。它为 Telegram 启动自己的
+OpenAI Codex App Server，把手机变成查看任务进度、切换会话、发送后续指令、
+处理 Plan 输入、审批操作和接收最终结果的远程控制入口。
 
-当前 fork 版本：[`v0.5.0-amadeus.1`](https://github.com/Amadeus1P048596/codex-tg/releases/tag/v0.5.0-amadeus.1)，
-基于上游 `v0.5.0`，目前以源码形式发布。
+当前模式是“**独立会话，共享记忆与 Skills**”：Telegram 不复用 Windows Codex
+客户端的 App Server、会话目录或运行时数据库；在 Codex runtime 层，两端只通过明确配置的
+资源链接共享 Skills、plugins、全局规则等能力，并通过独立的应用级记忆库共享用户明确批准的
+持久信息。项目 workspace 仍可按配置指向同一批本地目录。
+
+最近发布标签：[`v0.5.0-amadeus.1`](https://github.com/Amadeus1P048596/codex-tg/releases/tag/v0.5.0-amadeus.1)，
+基于上游 `v0.5.0`。当前分支还包含 `Unreleased` 修正，目前均以源码形式提供。
 
 > **Fork 与致谢**
 >
@@ -68,7 +73,9 @@ Codex · 处理中 · 38s
 - 切换会话时会清理旧的非终态卡片，并显示新前台会话的当前状态。
 - 后台任务的过程更新保持静默，只在终态或需要输入时提供一次“切换至该会话”入口。
 
-`/threads` 不会把隔离的 Codex Desktop 历史缓存伪装成当前 runtime 中可以操作的会话。
+`/threads` 只列出 Telegram 独立 runtime 中的真实会话，不会混入 Windows Codex
+客户端的历史。这两个入口可以同时工作，但不会看到或写入彼此的 thread；如果配置到同一
+workspace，磁盘上的源码改动仍然是双方可见的。
 
 ### 会话创建与管理
 
@@ -80,17 +87,18 @@ Codex · 处理中 · 38s
 - `/archive`：仅归档当前空闲会话，执行前需要按钮确认。
 - `/unarchive`：按每页 10 条列出真实归档会话并恢复。
 
-### Telegram 写入权交接
+### Telegram 独立 runtime 内的写入会话
 
-同一个 Codex thread 可以被多个客户端读取，但活跃的 App Server 连接会持有写入权。
-本 fork 对这件事做了显式处理：
+Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Server 会话和一条
+只读轮询会话。这里的写入权管理只发生在 Telegram 独立 runtime 内，不是在 Telegram
+与 Windows Codex 客户端之间交接会话：
 
-- `/show` 和观察模式只读，不会主动抢占会话。
-- `/bind` 或卡片上的 `由 TG 接管` 会让 Telegram 获取并保持写入权。
-- 如果 Codex Desktop 等其他客户端正在持有写入权，Telegram 会报告冲突，不会排队消息，
-  也不会偷偷创建并行 turn。
-- `/release` 或 `释放 TG 控制` 会在所有相关会话都安全空闲时释放当前 Telegram
-  live session 持有的写入权。
+- `/show` 和观察模式通过只读轮询查看状态，不会加载 live writer。
+- `/bind` 或卡片上的 `在 TG 中继续` 会切换前台路由，并让 TG live App Server 加载该会话。
+- 若隔离 runtime 内意外存在另一个 App Server writer，Telegram 会报告冲突；输入不会排队，
+  也不会偷偷创建并行 turn。这个检查是 runtime 内的防御措施，不代表 Desktop 正在共享会话。
+- `/release` 或 `释放空闲写入权` 会在所有相关会话都安全空闲时重建 live App Server，
+  只读轮询保持连接。
 - 连续 5 分钟没有允许用户的 Telegram 消息或按钮操作时，守护进程会尝试同样的安全释放；
   活跃任务、审批或等待输入会推迟释放。
 
@@ -110,19 +118,22 @@ Codex · 处理中 · 38s
 ## 工作方式
 
 ```text
-Telegram
-   │  Bot API：消息、按钮、图片、通知
-   ▼
-codex-tg Go daemon
-   ├── SQLite：路由、绑定、卡片、收件箱和投递状态
-   ├── Telegram adapter：渲染与输入
-   └── Codex control / App Server client
-                          │ 本机 stdio
-                          ▼
-                   codex app-server
-                          │
-                          ▼
-                 本地 thread / turn / workspace
+Windows Codex 客户端                         Telegram
+   │ 自有 App Server                            │ Bot API
+   ▼                                            ▼
+Desktop CODEX_HOME                        codex-tg Go daemon
+   ├── Desktop sessions                     ├── daemon SQLite
+   ├── state / writer locks                 ├── live App Server（写入）
+   └── runtime cache                        └── poll App Server（只读）
+                                                  │ 本机 stdio
+                                                  ▼
+                                          Telegram CODEX_HOME
+                                             ├── TG sessions
+                                             ├── state / writer locks
+                                             └── runtime cache
+
+runtime 层只共享：Skills / plugins / packages / 全局规则 + 独立的应用级持久记忆库
+项目层可按配置使用同一 workspace
 ```
 
 关键约束：
@@ -130,7 +141,8 @@ codex-tg Go daemon
 - Codex App Server 是 thread、turn、审批和实时事件的权威来源。
 - `threadId` 是持久身份；Telegram chat/topic 只是输入和展示表面。
 - SQLite 保存路由、绑定、回调、卡片、观察目标、收件箱和投递元数据。
-- App Server 默认通过本机 stdio 启动，不应直接暴露到公网。
+- live 与 poll App Server 默认都通过本机 stdio 启动，不应直接暴露到公网。
+- Windows Codex 客户端与 Telegram daemon 各自拥有 App Server 生命周期和可变状态。
 
 ## 快速开始
 
@@ -161,8 +173,13 @@ go run ./cmd/ctr-go doctor
 ```
 
 `init` 会引导填写 Telegram token、允许的用户、默认工作目录等信息，并默认写入
-`~/.codex-tg/config.env`。也可以通过 `CTR_GO_CONFIG` 指定其他配置路径；显式环境变量的
-优先级高于配置文件。
+`~/.codex-tg/config.env`。新配置会把 `CTR_GO_CODEX_HOME` 默认设为
+`~/.codex-tg/codex-home`，从一开始就与 Windows Codex 客户端隔离。也可以通过
+`CTR_GO_CONFIG` 指定其他配置路径；显式环境变量的优先级高于配置文件。
+
+隔离 home 需要自己的 Codex 授权文件。首次使用时，请把 `CODEX_HOME` 临时指向该目录，
+按本机 Codex CLI 的登录流程完成授权，然后再启动 daemon。不要从 Desktop home 复制
+或链接 session、SQLite、writer lock 和缓存文件。
 
 如果更喜欢直接使用环境变量，PowerShell 示例为：
 
@@ -170,6 +187,7 @@ go run ./cmd/ctr-go doctor
 $env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
 $env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
 $env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
+$env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
 ```
 
 ### 3. 启动守护进程
@@ -215,11 +233,11 @@ Windows 和 Linux 当前建议使用自己的进程管理方式运行 `ctr-go da
 | 首页与导航 | `/threads`、`/projects` | 切换 runtime 会话或从项目视图导航 |
 | 新建会话 | `/newchat`、`/newthread`、`/new` | 创建 Chat、普通会话或指定项目会话 |
 | 会话管理 | `/title`、`/archive`、`/unarchive`、`/cancel` | 重命名、归档、恢复或取消待输入流程 |
-| 路由与输入 | `/show`、`/bind`、`/reply` | 查看、接管或向指定会话发送内容 |
+| 路由与输入 | `/show`、`/bind`、`/reply` | 查看、在 TG 中继续或向指定会话发送内容 |
 | Plan Mode | `/plan`、`/reply --plan` | 在路由会话中启动 Plan Mode |
 | 模型设置 | `/settings`、`/model`、`/effort` | 查看并修改 Telegram 发起任务使用的模型设置 |
 | 观察与诊断 | `/observe all\|off`、`/context`、`/status` | 管理全局观察目标并查看路由/运行状态 |
-| 写入权与维护 | `/release`、`/repair`、`/stop` | 释放写入权、重建 App Server 会话或停止任务 |
+| 写入权与维护 | `/release`、`/repair`、`/stop` | 释放空闲 live 写入权、重建 App Server 会话或停止任务 |
 | 审批 | `/approve`、`/deny` | 接受或拒绝待审批请求 |
 | 卡片兼容 | `/panelmode per_run\|stable` | 切换每 turn 卡片或稳定复用卡片模式 |
 
@@ -250,7 +268,7 @@ ctr-go version
 | `CTR_GO_DEFAULT_CWD` | Codex 默认工作目录 |
 | `CTR_GO_CODEX_CHATS_ROOT` | Codex UI Chat 根目录，默认 `~/Documents/Codex` |
 | `CTR_GO_CODEX_BIN` | Codex CLI 可执行文件路径或命令名 |
-| `CTR_GO_CODEX_HOME` | 仅传给子 App Server 的隔离 `CODEX_HOME` |
+| `CTR_GO_CODEX_HOME` | 仅传给 TG 子 App Server 的独立 `CODEX_HOME`；新配置默认 `~/.codex-tg/codex-home` |
 | `CTR_GO_CONFIG` | 自定义 `config.env` 路径 |
 | `CTR_GO_HOME` | 自定义 daemon 数据、日志和 SQLite 根目录 |
 | `CTR_GO_PANEL_MODE` | `per_run`（默认）或 `stable` |
@@ -269,23 +287,43 @@ ctr-go version
 [`.env.example`](.env.example)。兼容变量 `CTR_TELEGRAM_BOT_TOKEN`、
 `CTR_ALLOWED_USER_IDS` 和 `CTR_ALLOWED_CHAT_IDS` 仍然可用。
 
-## 隔离 Codex Desktop 与 Telegram runtime
+## 独立会话，共享记忆与 Skills
 
-设置 `CTR_GO_CODEX_HOME` 后，只有 `codex-tg` 启动的 App Server 子进程会收到这个
-`CODEX_HOME`；父进程、daemon 和 Codex Desktop 不会被修改。
+`CTR_GO_CODEX_HOME` 只传给 `codex-tg` 启动的 live/poll App Server 子进程；父进程、
+daemon 和 Windows Codex 客户端不会被修改。新安装由 `ctr-go init` 和 macOS
+`service install` 默认写入独立路径，已有配置不会被静默迁移。
 
 ```powershell
 $env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
 ```
 
-建议：
+### 为什么这样设计
 
-- 为 Telegram runtime 使用独立的状态数据库、thread 历史和 writer lock。
-- 可以通过文件系统链接共享静态资源，例如 `skills`、plugins 和全局说明。
-- 不要在 Desktop 与 Telegram home 之间复制或链接 `state_*.sqlite`、session 数据库、
-  thread 历史、writer lock 或运行时缓存。
+- App Server 会持有 thread writer，并维护 session、SQLite、锁和缓存；两个客户端共享这些
+  可变文件容易产生写入冲突、锁竞争和状态漂移。
+- Desktop 与 Telegram 可以独立启动、修复、升级和清理；一端崩溃或迁移数据库时不会阻塞
+  或损坏另一端。
+- `/threads` 的含义保持确定：它展示 Telegram runtime 真正能够继续的会话，而不是一个
+  看得见却无法安全写入的 Desktop 历史列表。
+- 能力与长期偏好仍然可以一致，因此隔离 runtime 不会变成一套完全陌生的 Codex 环境。
 
-隔离模式下，`/threads` 只显示该 Telegram runtime 真正能够访问的会话，这是预期行为。
+### 共享边界
+
+可以通过明确的文件系统链接共享 `skills`、`plugins`、`packages`、`AGENTS.md` 和经过审查的
+全局配置。若安装了本机 `shared-memory` Skill，两端还可以使用
+`~/.codex-shared/memory/memory.sqlite`（或 `CODEX_SHARED_MEMORY_PATH`）共享用户明确批准的
+稳定事实、偏好和协作约定。
+
+共享记忆不等于共享聊天记录：conversation、thread/run id、临时任务状态、凭据和秘密都不应
+写入该记忆库。Desktop 与 Telegram 之间也绝不能复制或链接 `sessions`、
+`archived_sessions`、`state_*.sqlite`、`memories_*.sqlite`、writer lock 或运行时缓存。
+
+`ctr-go init` 只负责写入隔离路径，不会自动复制运行时文件或创建上述共享链接；共享项应由
+操作者逐项配置和审查。
+
+项目 workspace 不属于 `CODEX_HOME` runtime 状态。两端可以有意指向同一仓库，但独立会话
+并不能阻止它们同时修改同一个文件；这种情况下仍应使用 Git 分支、工作树或人工协调来避免
+源码层面的冲突。
 
 ## 验证与开发
 
