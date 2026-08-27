@@ -62,10 +62,16 @@ func TestRenderSegmentsConvertsPipeTableToTelegramReadableRecords(t *testing.T) 
 	if strings.Contains(message.Text, "| ---") || strings.Contains(message.Text, "| 检查项 |") {
 		t.Fatalf("rendered text still contains a raw Markdown table: %q", message.Text)
 	}
-	for _, want := range []string{"检查项：App Server", "结果：✅", "说明：stdio", "检查项：私钥", "结果：未发现", "说明：0 命中"} {
+	if strings.Contains(message.Text, "检查项：") {
+		t.Fatalf("rendered text repeats the first-column header instead of using a record title: %q", message.Text)
+	}
+	for _, want := range []string{"App Server", "结果： ✅", "说明： stdio", "私钥", "结果： 未发现", "说明： 0 命中"} {
 		if !strings.Contains(message.Text, want) {
 			t.Fatalf("rendered text = %q, want labeled field %q", message.Text, want)
 		}
+	}
+	if !hasEntity(message.Entities, "bold", "") {
+		t.Fatalf("entities = %#v, want bold record titles", message.Entities)
 	}
 	if !hasEntity(message.Entities, "code", "") {
 		t.Fatalf("entities = %#v, want table cell inline code entity", message.Entities)
@@ -94,10 +100,16 @@ func TestMarkdownToHTMLConvertsPipeTableToTelegramReadableRecords(t *testing.T) 
 	if strings.Contains(htmlText, "| ---") || strings.Contains(plainText, "| ---") {
 		t.Fatalf("MarkdownToHTML left raw table syntax: html=%q plain=%q", htmlText, plainText)
 	}
-	for _, want := range []string{"项目：图片", "状态：保留"} {
+	if strings.Contains(plainText, "项目：") {
+		t.Fatalf("plainText repeats the first-column header instead of using a record title: %q", plainText)
+	}
+	for _, want := range []string{"图片", "状态： 保留"} {
 		if !strings.Contains(plainText, want) {
 			t.Fatalf("plainText = %q, want %q", plainText, want)
 		}
+	}
+	if !strings.Contains(htmlText, "<b>图片</b>") {
+		t.Fatalf("htmlText = %q, want bold record title", htmlText)
 	}
 	if !strings.Contains(htmlText, "<code>保留</code>") {
 		t.Fatalf("htmlText = %q, want inline code", htmlText)

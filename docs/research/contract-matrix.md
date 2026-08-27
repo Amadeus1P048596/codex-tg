@@ -173,7 +173,8 @@ Adapter routing:
   because App Server ingestion may be asynchronous; scheduled cleanup removes
   them, and matching files older than 24 hours are treated as stale.
 - Outside fenced code blocks, GitHub-style Markdown pipe tables render as
-  per-row labeled Telegram list records rather than raw aligned text.
+  per-row Telegram list records rather than raw aligned text. The first column
+  is the record title and remaining columns are vertically labeled fields.
 - Telegram-visible text must never render literal `"<nil>"`. Missing, null, empty, or nil-like App Server fields are treated as absent and must be cleaned before Markdown/entity conversion.
 
 ## Callback / button surface from the oracle

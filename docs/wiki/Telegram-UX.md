@@ -119,7 +119,8 @@ by this implementation slice.
 Telegram has no native table entity and proportional mobile fonts make raw pipe
 tables hard to read. Outside fenced code blocks, the renderer rewrites a
 GitHub-style Markdown pipe table into one labeled list record per source row.
-Column names become field labels, while inline code and other supported Markdown
+The first column becomes the bold record title; remaining column names become
+bold field labels stacked below it. Inline code and other supported Markdown
 inside cells continue through the normal Telegram entity converter. Pipe-table
 examples inside fenced code blocks remain unchanged.
 

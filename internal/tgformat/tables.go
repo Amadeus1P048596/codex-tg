@@ -65,11 +65,17 @@ func telegramReadableMarkdownTables(markdown string) string {
 			if rowIndex > 0 {
 				out = append(out, "")
 			}
+			title := "记录 " + strconv.Itoa(rowIndex+1)
+			if len(row) > 0 && strings.TrimSpace(row[0]) != "" {
+				title = strings.TrimSpace(row[0])
+			}
+			out = append(out, "- **"+title+"**")
+
 			columns := len(headers)
 			if len(row) > columns {
 				columns = len(row)
 			}
-			for column := 0; column < columns; column++ {
+			for column := 1; column < columns; column++ {
 				label := ""
 				if column < len(headers) {
 					label = strings.TrimSpace(headers[column])
@@ -81,11 +87,7 @@ func telegramReadableMarkdownTables(markdown string) string {
 				if column < len(row) && strings.TrimSpace(row[column]) != "" {
 					value = strings.TrimSpace(row[column])
 				}
-				prefix := "  "
-				if column == 0 {
-					prefix = "- "
-				}
-				out = append(out, prefix+label+"："+value)
+				out = append(out, "  **"+label+"：** "+value)
 			}
 		}
 		index = bodyEnd

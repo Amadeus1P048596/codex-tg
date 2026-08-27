@@ -325,7 +325,8 @@ Contract notes:
   asynchronous-read window, then scheduled cleanup removes it; stale cleanup
   touches only expired `telegram-photo-*` inputs.
 - Markdown pipe tables outside fenced code become labeled Telegram list
-  records in both entity and HTML render paths. Fenced examples stay literal.
+  records in both entity and HTML render paths: first-column values are record
+  titles and remaining columns are labeled fields. Fenced examples stay literal.
 - Explicit exports and direct command/menu responses are silent.
 - Legacy Tool/Output views are diagnostic drill-down surfaces only.
 - One chat/topic has one foreground thread. Background progress produces no
@@ -490,7 +491,8 @@ Primary tests:
 Contract notes:
 
 - Telegram has no native table entity. Preserve information by rendering every
-  source row as a mobile-readable record with explicit column labels.
+  source row as a mobile-readable record: use its first-column value as the
+  title and keep explicit labels for every remaining field.
 - Do not rewrite pipe syntax inside fenced code blocks.
 - App Server RPC acceptance does not prove that an asynchronous `localImage`
   read has finished. Keep the private input for 30 minutes, schedule deletion,
