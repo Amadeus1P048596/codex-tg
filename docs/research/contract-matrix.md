@@ -29,7 +29,7 @@ This file now serves two purposes:
 - `/new <project-key-or-number> <prompt>`
 - `/newchat <prompt>`
 - `/newthread <prompt>`
-- `/newchat` or `/newthread`, followed by a plain-text title and then a distinct prompt; `/cancel` aborts either pending stage
+- `/newchat` or `/newthread`, followed by a plain-text title and then a distinct text-or-photo prompt; `/cancel` aborts either pending stage
 - `/context`
 - `/whereami`
 - `/observe all|off`
@@ -138,10 +138,10 @@ Adapter routing:
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
 - `/projects` buttons show meaningful labels (`N. Project name`, `Chat N. Thread name`); internal project keys are not rendered in the menu, and project rows show `last thread:`.
 - Cached threads under generic `Documents/Codex` paths or the configured `CTR_GO_CODEX_CHATS_ROOT` are treated as single-thread `Chats`; selecting a Chat opens and binds that thread and does not offer project `New thread`.
-- `New thread` creates a one-shot state; the next plain-text message starts a new App Server thread in the selected project cwd and uses that text as the first prompt.
+- `New thread` creates a one-shot state; the next text or Telegram-photo message starts a new App Server thread in the selected project cwd and uses its structured inputs as the first prompt.
 - `/newchat <prompt>` creates a dated Chat folder under the configured Chats root, calls App Server `thread/start` with that cwd, and uses the prompt as the first turn.
 - `/newthread <prompt>` starts a new App Server thread without a Telegram-selected cwd parameter and uses the prompt as the first turn. It must not create a Chat folder; App Server may still attach the daemon default cwd.
-- When either command omits `<prompt>`, the bridge persists a 15-minute chat/topic-scoped title-then-prompt state. The first plain-text message supplies an explicit App Server title and the second supplies the first turn prompt; `/cancel` clears either stage, and restart does not lose it.
+- When either command omits `<prompt>`, the bridge persists a 15-minute chat/topic-scoped title-then-prompt state. The first plain-text message supplies an explicit App Server title and the second supplies the first turn prompt, including an optional Telegram `localImage`; a photo while the title is pending is not routed elsewhere. `/cancel` clears either stage, and restart does not lose it.
 - `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.
@@ -169,8 +169,9 @@ Adapter routing:
   archive move and state transition.
 - Raw events are de-duplicated and prioritized into at most three recent
   activities. Fast incidental tools usually contribute only to the operation count.
-- Telegram photos on routed threads use the largest available size and App
-  Server `localImage`; they do not create a separate receipt card.
+- Telegram photos on routed threads or as a pending new thread's first prompt
+  use the largest available size and App Server `localImage`; they do not create
+  a separate receipt card.
 - Private Telegram photo inputs remain readable for 30 minutes after dispatch
   because App Server ingestion may be asynchronous; scheduled cleanup removes
   them, and matching files older than 24 hours are treated as stale.

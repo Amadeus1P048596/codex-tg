@@ -167,6 +167,10 @@ Live E2E:
 - Open `/projects`, choose a project, press `New thread`, send a prompt, and verify a new thread/run reaches `[Final]`.
 - Open `/projects`, verify normal projects are sorted by recent activity, `Documents/Codex` threads are shown only as latest Chat previews, then open full `Chats` pagination and select a Chat.
 - Run `/newchat`, enter a title, then enter a distinct prompt. Verify the App Server title matches the first input, only the second input starts the turn, the title-derived cwd exists under the configured Chats root, the thread reaches its Completed card, `/projects -> Open Chats` shows it, and a plain follow-up routes to the newly bound Chat thread.
+- Repeat the interactive flow with a captioned photo as the second input. Verify
+  the new thread receives both text and `localImage`, and the previous binding
+  receives neither. Send a photo during the title stage and verify the title
+  prompt remains armed without routing the photo to the previous binding.
 - Run `/newthread`, enter a title and then a distinct prompt. Verify the title is written through, only the prompt starts the turn, and no Chat cwd is created under the configured Chats root.
 - Arm either title-then-prompt flow, send `/cancel` at either stage, and verify the next plain message is not consumed as creation input. Repeat across a daemon restart and after the 15-minute expiry boundary.
 - Run the one-line `/newchat <prompt>` and `/newthread <prompt>` forms and verify backward compatibility.
@@ -181,7 +185,12 @@ Contract notes:
 - Project buttons use `N. Project name`; Chat buttons use `Chat N. Thread name`. The menu must not render internal `key:` rows and must show each project row's `last thread:`.
 - `/newchat <prompt>` creates a dated Chat cwd from a prompt slug and passes that cwd to App Server `thread/start`; it remains the backward-compatible one-line form.
 - `/newthread <prompt>` creates a new App Server thread without a Telegram-selected cwd parameter. It must not create a Chat folder; App Server may still attach the daemon default cwd.
-- `/newchat` and `/newthread` without prompts collect an explicit title and then a distinct first prompt. The pending stage, title, and context are SQLite-backed, survive restart, expire after 15 minutes, and `/cancel` deletes them. The title is written to App Server and retained as user-owned Telegram metadata.
+- `/newchat` and `/newthread` without prompts collect an explicit plain-text
+  title and then a distinct first prompt, which may contain Telegram
+  `localImage` inputs. The pending stage, title, and context are SQLite-backed,
+  survive restart, expire after 15 minutes, and `/cancel` deletes them. A photo
+  during the title stage stays out of the previous binding. The title is written
+  to App Server and retained as user-owned Telegram metadata.
 - A one-line `/newchat <prompt>` or `/newthread <prompt>` clears any older pending creation state before starting immediately.
 - Telegram must not accept arbitrary local filesystem paths for thread creation.
 - The first prompt is required; create-only threads are out of scope for this slice.
@@ -254,6 +263,8 @@ Primary tests:
 - `internal/telegram/bot_test.go::TestLargestTelegramPhotoSelectsHighestResolution`
 - `internal/appserver/client_test.go::TestTurnStartInputParamsIncludesTextAndLocalImage`
 - `internal/daemon/service_test.go::TestHandleMessageWithLocalImageStartsRichTurn`
+- `internal/daemon/service_test.go::TestPendingNewChatConsumesCaptionAndLocalImageAsFirstPrompt`
+- `internal/daemon/service_test.go::TestPendingNewChatPhotoWhileWaitingForTitleDoesNotRouteToBinding`
 - `internal/config/config_test.go::TestMarshalJSONIncludesNotifyNewRun`
 - `tests/config_env_test.go::TestFromEnvDefaultsLoggingOn`
 - `tests/config_env_test.go::TestFromEnvPrefersGoScopedEnvVars`
@@ -303,6 +314,9 @@ Live E2E:
   never appear in the default card.
 - Send a photo with and without a caption to a bound thread and verify the image
   reaches Codex and follows the same one-card lifecycle.
+- After entering an interactive `/newchat` title, send a captioned photo as the
+  first prompt and verify it creates the new Chat rather than using the prior
+  binding.
 - Run a Plan Mode structured-choice prompt and verify the summary card becomes
   Needs input with the correct answer buttons.
 
@@ -492,6 +506,8 @@ Primary tests:
 - `internal/tgformat/markdown_test.go::TestMarkdownToHTMLConvertsPipeTableToTelegramReadableRecords`
 - `internal/telegram/bot_test.go::TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored`
 - `internal/telegram/bot_test.go::TestRemoveStaleTelegramTempFilesRemovesOnlyExpiredPhotoInputs`
+- `internal/daemon/service_test.go::TestPendingNewChatConsumesCaptionAndLocalImageAsFirstPrompt`
+- `internal/daemon/service_test.go::TestPendingNewChatPhotoWhileWaitingForTitleDoesNotRouteToBinding`
 
 Contract notes:
 
@@ -502,6 +518,9 @@ Contract notes:
 - App Server RPC acceptance does not prove that an asynchronous `localImage`
   read has finished. Keep the private input for 30 minutes, schedule deletion,
   and remove matching leftovers older than 24 hours.
+- Pending interactive creation takes precedence over the existing binding for a
+  photo first prompt. The title stage remains plain-text-only and must fail
+  closed rather than misroute the photo.
 
 ## Diagnostics And Sanitization
 

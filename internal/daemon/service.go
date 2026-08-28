@@ -339,6 +339,9 @@ func (s *Service) HandleMessageWithLocalImages(ctx context.Context, chatID, topi
 	if len(inputs) == 1 {
 		return s.HandleMessage(ctx, chatID, topicID, userID, text, replyToMessageID)
 	}
+	if response, consumed, err := s.maybeConsumeNewThreadPromptInputs(ctx, chatID, topicID, text, inputs); consumed {
+		return response, err
+	}
 	return s.handlePlainInputs(ctx, chatID, topicID, text, inputs, replyToMessageID)
 }
 

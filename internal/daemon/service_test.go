@@ -53,6 +53,126 @@ func TestHandleMessageWithLocalImageStartsRichTurn(t *testing.T) {
 	}
 }
 
+func TestPendingNewChatConsumesCaptionAndLocalImageAsFirstPrompt(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	service.cfg.CodexChatsRoot = t.TempDir()
+	service.now = func() time.Time { return time.Date(2026, 8, 28, 19, 46, 0, 0, time.Local) }
+	ctx := context.Background()
+	oldThread := model.Thread{ID: "old-bound-thread", Title: "Existing", Status: "idle", UpdatedAt: 1}
+	if err := service.store.UpsertThread(ctx, oldThread); err != nil {
+		t.Fatalf("UpsertThread(old) failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, oldThread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding(old) failed: %v", err)
+	}
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-photo-chat", "title": "New chat"}},
+		threadReads: map[string]map[string]any{
+			"new-photo-chat": {
+				"thread": map[string]any{
+					"id":     "new-photo-chat",
+					"title":  "New chat",
+					"status": "active",
+					"turns": []any{map[string]any{
+						"id":     "started-turn",
+						"status": "inProgress",
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "分析这张心率图"}}}},
+					}},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	if _, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0); err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	if _, err := service.handlePlainText(ctx, 123456789, 0, "健康管理", 0); err != nil {
+		t.Fatalf("handlePlainText(title) failed: %v", err)
+	}
+	response, err := service.HandleMessageWithLocalImages(
+		ctx,
+		123456789,
+		0,
+		123456789,
+		"分析这张心率图",
+		[]string{`C:\runtime\heart-rate.jpg`},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("HandleMessageWithLocalImages(prompt) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "new-photo-chat" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want newly created photo Chat", response)
+	}
+	if len(stub.threadStartCalls) != 1 {
+		t.Fatalf("threadStartCalls = %#v, want one new Chat", stub.threadStartCalls)
+	}
+	if len(stub.threadResumeCalls) != 0 {
+		t.Fatalf("threadResumeCalls = %#v, photo prompt was routed to the old binding", stub.threadResumeCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one rich first turn", stub.turnStartCalls)
+	}
+	inputs := stub.turnStartCalls[0].inputs
+	if len(inputs) != 2 || inputs[0].Type != "text" || inputs[0].Text != "分析这张心率图" || inputs[1].Type != "localImage" || inputs[1].Path != `C:\runtime\heart-rate.jpg` {
+		t.Fatalf("inputs = %#v, want caption + local image on the new Chat", inputs)
+	}
+	if _, ok, _, err := service.pendingNewThreadState(ctx, 123456789, 0); err != nil || ok {
+		t.Fatalf("pending state after consume: ok=%v err=%v, want cleared", ok, err)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil || binding == nil || binding.ThreadID != "new-photo-chat" {
+		t.Fatalf("binding = %#v err=%v, want new photo Chat", binding, err)
+	}
+}
+
+func TestPendingNewChatPhotoWhileWaitingForTitleDoesNotRouteToBinding(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	oldThread := model.Thread{ID: "old-bound-thread", Title: "Existing", Status: "idle", UpdatedAt: 1}
+	if err := service.store.UpsertThread(ctx, oldThread); err != nil {
+		t.Fatalf("UpsertThread(old) failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, oldThread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding(old) failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	if _, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0); err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	response, err := service.HandleMessageWithLocalImages(
+		ctx,
+		123456789,
+		0,
+		123456789,
+		"健康管理",
+		[]string{`C:\runtime\heart-rate.jpg`},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("HandleMessageWithLocalImages(title) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "等待标题") || !strings.Contains(response.Text, "纯文本标题") {
+		t.Fatalf("response = %#v, want plain-text title guidance", response)
+	}
+	if len(stub.threadStartCalls) != 0 || len(stub.threadResumeCalls) != 0 || len(stub.turnStartCalls) != 0 {
+		t.Fatalf("photo was dispatched while waiting for title: start=%#v resume=%#v turn=%#v", stub.threadStartCalls, stub.threadResumeCalls, stub.turnStartCalls)
+	}
+	state, ok, expired, err := service.pendingNewThreadState(ctx, 123456789, 0)
+	if err != nil || !ok || expired || state.Stage != pendingNewThreadStageTitle {
+		t.Fatalf("pending state = %#v ok=%v expired=%v err=%v, want title stage retained", state, ok, expired, err)
+	}
+}
+
 func TestResolveRoutePrecedenceExplicitThenReplyThenBinding(t *testing.T) {
 	t.Parallel()
 

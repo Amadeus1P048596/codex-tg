@@ -55,10 +55,11 @@ derive user-facing activities without exposing each transport event.
   runtime. Cached threads missing from that runtime are not selectable, and
   thread titles are the inline buttons rather than numbered `Open` actions.
 - Interactive `/newchat` and `/newthread` flows collect an explicit title before
-  the first prompt and write it through to App Server. Legacy one-line forms use
-  the first prompt as a display-title fallback while App Server still reports an
-  id or generic placeholder. `/title` writes through to App Server and refreshes
-  the current card in place.
+  the first prompt and write it through to App Server. After the plain-text title,
+  that first prompt may contain Telegram `localImage` inputs. Legacy one-line
+  forms use the first prompt as a display-title fallback while App Server still
+  reports an id or generic placeholder. `/title` writes through to App Server
+  and refreshes the current card in place.
 - `/archive` requires an inline confirmation for the current foreground thread.
   `/unarchive` reads App Server's archived list with ten-row cursor pagination
   and uses each thread title as the restore action.
@@ -91,5 +92,5 @@ derive user-facing activities without exposing each transport event.
 - Removing tool observability or full-log exports.
 - Streaming every model token into Telegram.
 - Rendering full UUIDs in normal cards.
-- Supporting Telegram media groups or photo-first new-thread creation in this
-  slice.
+- Supporting Telegram media groups, using a photo as the pending title, or
+  attaching media to the one-line command forms in this slice.

@@ -1,5 +1,17 @@
 # Validation Notes
 
+- 2026-08-28 CST pending-new-session photo validation reproduced that
+  `HandleMessageWithLocalImages` skipped the title-then-prompt consumer and sent
+  a captioned photo to the previous binding. The image handler now gives pending
+  creation precedence, starts the new thread with structured text plus
+  `localImage` inputs, and fails closed with plain-text-title guidance when a
+  photo arrives during the title stage. Both previous-binding regression cases,
+  related creation/photo tests, full `go test ./...`, `go build
+  -buildvcs=false ./...`, targeted `go vet`, `git diff --check`, and the public
+  secret/local-path scan passed. The Windows daemon candidate is queued behind
+  an idle-gated, rollback-capable cutover because this validating Telegram turn
+  owns the current live writer.
+
 - 2026-08-27 CST Windows resumed-thread archive validation reproduced the
   Codex App Server 0.148.0 extended-path cache failure, then replaced the
   one-shot path rewrite with generation-local prepared/resumed caches and an

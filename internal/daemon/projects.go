@@ -729,6 +729,10 @@ func (s *Service) resolveProjectWorkspaceSelector(ctx context.Context, selector 
 }
 
 func (s *Service) maybeConsumeNewThreadPrompt(ctx context.Context, chatID, topicID int64, text string) (*DirectResponse, bool, error) {
+	return s.maybeConsumeNewThreadPromptInputs(ctx, chatID, topicID, text, []control.UserInput{{Type: "text", Text: text}})
+}
+
+func (s *Service) maybeConsumeNewThreadPromptInputs(ctx context.Context, chatID, topicID int64, text string, inputs []control.UserInput) (*DirectResponse, bool, error) {
 	state, ok, expired, err := s.pendingNewThreadState(ctx, chatID, topicID)
 	if err != nil {
 		return nil, true, err
@@ -747,6 +751,9 @@ func (s *Service) maybeConsumeNewThreadPrompt(ctx context.Context, chatID, topic
 		return &DirectResponse{Text: "新会话请求已超时，请返回 /projects 重新选择新建会话。"}, true, nil
 	}
 	if state.Stage == pendingNewThreadStageTitle {
+		if userInputsHaveLocalImage(inputs) {
+			return &DirectResponse{Text: "当前正在等待标题，请先单独发送纯文本标题。标题记录后，可以在首条 prompt 中附带图片。\n\n发送 /cancel 取消。"}, true, nil
+		}
 		title := compactThreadSelectionText(text)
 		if title == "" {
 			return &DirectResponse{Text: "标题不能为空，请重新输入。\n\n发送 /cancel 取消。"}, true, nil
@@ -778,7 +785,7 @@ func (s *Service) maybeConsumeNewThreadPrompt(ctx context.Context, chatID, topic
 		state.DirectoryName = ""
 		state.CWD = ""
 	}
-	response, err := s.createThreadFromProjectPrompt(ctx, chatID, topicID, state, prompt)
+	response, err := s.createThreadFromProjectPromptInputs(ctx, chatID, topicID, state, prompt, inputs)
 	return response, true, err
 }
 
@@ -802,6 +809,10 @@ func (s *Service) pendingNewThreadState(ctx context.Context, chatID, topicID int
 }
 
 func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, topicID int64, state pendingNewThreadState, prompt string) (*DirectResponse, error) {
+	return s.createThreadFromProjectPromptInputs(ctx, chatID, topicID, state, prompt, []control.UserInput{{Type: "text", Text: prompt}})
+}
+
+func (s *Service) createThreadFromProjectPromptInputs(ctx context.Context, chatID, topicID int64, state pendingNewThreadState, prompt string, inputs []control.UserInput) (*DirectResponse, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return &DirectResponse{Text: "首条 prompt 不能为空，请重新新建会话。"}, nil
 	}
@@ -859,7 +870,7 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 
 	options := s.turnStartOptions(ctx, "", &thread)
 	started = time.Now()
-	turnPayload, err := live.TurnStart(requestCtx, thread.ID, prompt, thread.CWD, options)
+	turnPayload, err := turnStartWithInputs(requestCtx, live, thread.ID, prompt, inputs, thread.CWD, options)
 	s.logAppServerCall("TurnStart", started, err, live, lifecycleFields{
 		"thread_id":        thread.ID,
 		"returned_turn_id": appserverThreadTurnID(turnPayload),

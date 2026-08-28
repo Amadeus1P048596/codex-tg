@@ -109,17 +109,21 @@ does not interrupt it.
 ## Photo Input
 
 A pure Telegram photo or photo with a caption is accepted on a routed or
-reply-targeted thread. The bot chooses the largest Telegram photo variant,
+reply-targeted thread and as the first prompt after an interactive `/newchat` or
+`/newthread` title. The bot chooses the largest Telegram photo variant,
 downloads up to 20 MiB into a private temporary directory, and starts or steers
 the turn with the caption plus an App Server `localImage` input. With no caption,
-it supplies a short default image-analysis prompt. The private temporary input
-remains available for 30 minutes after dispatch because App Server may read a
-`localImage` asynchronously after accepting the RPC. Scheduled cleanup removes
-it afterward; startup and later downloads also remove matching files older than
-24 hours. No separate media-receipt card is created.
+it supplies a short default image-analysis prompt. A photo sent while the title
+itself is still pending is not routed to the existing binding; the bot asks for
+a plain-text title first. The private temporary input remains available for 30
+minutes after dispatch because App Server may read a `localImage` asynchronously
+after accepting the RPC. Scheduled cleanup removes it afterward; startup and
+later downloads also remove matching files older than 24 hours. No separate
+media-receipt card is created.
 
-Media groups and photo-first `/newchat` or `/newthread` creation are not covered
-by this implementation slice.
+Media groups, image titles, and media attached to one-line `/newchat <prompt>`
+or `/newthread <prompt>` command forms are not covered by this implementation
+slice.
 
 ## Markdown Tables
 
