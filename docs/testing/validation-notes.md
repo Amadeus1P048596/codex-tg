@@ -8,9 +8,9 @@
   snapshots are excluded even if their thread row is stale-active. Targeted
   navigation tests, full `go test ./...`, `go vet ./...`, `go build
   -buildvcs=false ./...`, `git diff --check`, and the public private-data scan
-  passed. The Windows candidate is staged behind three consecutive idle checks;
-  live `/home` readback remains pending until the active run completes and the
-  rollback-capable cutover can proceed.
+  passed. The Windows candidate is staged but no restart is scheduled; live
+  `/home` readback remains pending until the operator explicitly authorizes a
+  rollback-capable cutover.
 
 - 2026-08-31 CST Scheduled tasks bridge validation added a private stdio MCP
   server and injected it into both new and resumed Telegram App Server threads
