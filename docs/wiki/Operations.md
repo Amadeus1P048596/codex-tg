@@ -69,15 +69,20 @@ default. Set `CTR_GO_CONFIG` to use another path. Environment variables override
 values from the config file, which lets LaunchAgent/systemd/manual deployments
 keep their existing overrides.
 
-## Scheduled Tasks Bridge
+## Scheduled Tasks
 
-Set `CTR_GO_AUTOMATIONS_DIR` to the Codex Desktop automation directory, normally
-`~/.codex/automations`, then restart codex-tg. `ctr-go status` reports the active
-path; `disabled` means no Telegram thread receives the scheduling tool.
+`CTR_GO_AUTOMATIONS_DIR` defaults to the private
+`~/.codex-tg/automations` directory. Keep it separate from Codex Desktop's
+`~/.codex/automations`; `ctr-go status` reports the active path.
 
-The bridge only writes standalone native cron definitions. Codex Desktop must
-remain running to execute local tasks and remains the place to inspect run
-history and notifications. If a requested schedule is not visible in Desktop,
-check the configured directory, restart/resume the Telegram thread, and inspect
-the daemon log for MCP startup failures. Do not work around the failure by
-sharing Desktop sessions or by running a second scheduler.
+The MCP adapter manages standalone cron definitions while the daemon polls and
+claims due time slots. Every run starts a new thread in the TG-private App
+Server, so results and input/approval requests use the normal Telegram observer.
+If a task does not start, check `automation.scheduler.last_tick_at` and
+`automation.scheduler.last_error` in `ctr-go doctor`, verify the live App Server
+is ready, and verify an observer target can be resolved. A task edited after its
+scheduled time intentionally waits for the next matching slot.
+
+When upgrading from ADR-022, move only Telegram-created `cron` definitions out
+of the Desktop directory, update `CTR_GO_AUTOMATIONS_DIR`, and leave Desktop
+heartbeat tasks in place. Do not point both clients at the same task store.

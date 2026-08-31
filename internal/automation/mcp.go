@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const toolDescription = "Manage Codex Scheduled tasks created from Telegram. Use this for recurring tasks, reminders, monitoring, or scheduled follow-ups. Telegram and Codex Desktop use isolated sessions, so this integration intentionally creates standalone cron automations only; heartbeat automations cannot target Telegram threads. The Codex Desktop Scheduled runner remains responsible for execution, history, notifications, and UI. Prefer updating an existing task over creating a duplicate. Times are local wall-clock times. Never put credentials or secrets in an automation prompt."
+const toolDescription = "Manage Scheduled tasks owned and executed by codex-tg. Use this for recurring tasks, reminders, monitoring, or scheduled follow-ups requested from Telegram. Telegram and Codex Desktop use isolated task stores and sessions, so this integration creates standalone cron tasks only; heartbeat tasks cannot target Telegram threads. Each due run starts a new background thread in the Telegram-private Codex runtime and sends its lifecycle/result through the Telegram observer. Prefer updating an existing task over creating a duplicate. Times are local wall-clock times. Never put credentials or secrets in an automation prompt."
 
 func ServeMCP(in io.Reader, out io.Writer, store *Store) error {
 	scanner := bufio.NewScanner(in)
@@ -103,9 +103,12 @@ func automationToolSpec() map[string]any {
 		"kind": map[string]any{
 			"type": "string", "const": "cron", "description": "Telegram scheduling uses standalone cron tasks because sessions are isolated from Desktop.",
 		},
+		"cwd": map[string]any{
+			"type": "string", "minLength": 1, "description": "Optional working directory for the isolated Telegram run. Omit it to use the daemon default working directory.",
+		},
 		"projectId": map[string]any{
 			"anyOf":       []any{map[string]any{"type": "string", "minLength": 1}, map[string]any{"type": "null"}},
-			"description": "Optional Codex Desktop project id. Use null for a projectless standalone task.",
+			"description": "Compatibility field. Use null unless migrating an older task; cwd controls the Telegram run directory.",
 		},
 		"model": map[string]any{
 			"type": "string", "description": "Model for scheduled runs. Omit on update to preserve the existing model.",

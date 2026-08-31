@@ -82,9 +82,9 @@ Contract notes:
 - Tray control is not a settings editor in v0.4.0.
 - Release archives and packages must not include local config, sessions, SQLite state, logs, or screenshots.
 
-## Telegram Scheduled Tasks Bridge
+## Telegram-Native Scheduled Tasks
 
-ADR: `docs/adr/ADR-022-telegram-scheduled-tasks-bridge.md`; feature brief is
+ADR: `docs/adr/ADR-023-telegram-native-scheduled-tasks.md`; feature brief is
 `docs/process/telegram-scheduled-tasks-brief.md`.
 
 Primary tests:
@@ -93,12 +93,20 @@ Primary tests:
 - `internal/automation/store_test.go::TestStoreRejectsUnsafeOrUnsupportedAutomation`
 - `internal/automation/store_test.go::TestStoreRequiresNativeCronRuntimeFields`
 - `internal/automation/store_test.go::TestStoreHidesAndProtectsDesktopHeartbeatTasks`
+- `internal/automation/store_test.go::TestStoreMarksTasksAsTelegramOwnedAndPersistsCWD`
+- `internal/automation/scheduler_test.go::TestLatestDueUsesLocalWallClockAndTaskUpdateBoundary`
+- `internal/automation/scheduler_test.go::TestLatestDueSupportsHourlyAndWeeklyIntervals`
 - `internal/automation/mcp_test.go::TestServeMCPListsAndCallsAutomationTool`
 - `internal/automation/mcp_test.go::TestServeMCPReturnsToolErrorsAsMCPContent`
 - `internal/appserver/client_test.go::TestAutomationMCPConfigUsesExplicitBinaryAndDirectory`
 - `internal/appserver/client_test.go::TestAutomationMCPConfigIsInjectedIntoThreadStartAndResume`
 - `internal/appserver/client_test.go::TestAutomationMCPConfigIsDisabledWithoutDirectory`
 - `internal/config/config_test.go::TestLoadReadsConfigFileAndEnvOverridesIt`
+- `internal/config/config_test.go::TestFromEnvDefaultsAutomationsInsideTelegramHome`
+- `internal/config/config_test.go::TestIsDesktopAutomationsDirRejectsConventionalSharedStore`
+- `internal/daemon/service_test.go::TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce`
+- `internal/daemon/service_test.go::TestNewRejectsConventionalDesktopAutomationStore`
+- `internal/daemon/service_test.go::TestAutomationRunStateFollowsTerminalAppServerSnapshot`
 - `cmd/ctr-go/main_test.go::TestRunInitWritesPrivateConfigAndRefusesOverwrite`
 - `cmd/ctr-go/service_test.go::TestServiceInstallInteractiveWizardRetriesInvalidValues`
 
@@ -106,14 +114,15 @@ Contract notes:
 
 - App Server still owns Telegram interactive thread state. The injected MCP
   server is a narrow orchestration adapter under ADR-019.
-- `CTR_GO_AUTOMATIONS_DIR` is the only shared mutable boundary introduced by
-  this feature; sessions, runtime databases, locks, and caches stay isolated.
+- `CTR_GO_AUTOMATIONS_DIR` is TG-private and defaults under `CTR_GO_HOME`;
+  Desktop and Telegram do not share task definitions or schedulers.
 - Both `thread/start` and `thread/resume` must receive the MCP config so existing
   Telegram threads gain the tool without rollout rewrites.
-- Only native standalone `cron` tasks are accepted. Desktop is the only
-  scheduler; heartbeat tasks targeting Telegram threads are invalid.
-- Direct MCP/native-store smoke does not prove Desktop execution. Operator QA
-  must also confirm the task appears in Desktop and can be run on schedule.
+- Only standalone `cron` tasks are accepted. Heartbeat continuation is invalid.
+- The daemon owns due-slot calculation and an at-most-once SQLite claim; App
+  Server owns the new thread and turn after dispatch.
+- Live operator QA must confirm a real due occurrence starts in the TG runtime
+  and produces Telegram readback without appearing in the Desktop task store.
 
 ## Plan Mode Routing
 

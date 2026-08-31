@@ -76,7 +76,7 @@ func TestAutomationMCPConfigUsesExplicitBinaryAndDirectory(t *testing.T) {
 
 	client := NewClient("codex", "stdio://", t.TempDir(), time.Second, ClientOptions{
 		AutomationCommand: `C:\apps\codex-tg\ctr-go.exe`,
-		AutomationsDir:    `C:\profiles\desktop\.codex\automations`,
+		AutomationsDir:    `C:\profiles\telegram\automations`,
 	})
 	config := client.automationMCPConfig()
 	if got := config["mcp_servers.codex_tg_automations.command"]; got != `C:\apps\codex-tg\ctr-go.exe` {
@@ -86,7 +86,7 @@ func TestAutomationMCPConfigUsesExplicitBinaryAndDirectory(t *testing.T) {
 	if !ok || len(args) != 1 || args[0] != "automation-mcp" {
 		t.Fatalf("args = %#v", config["mcp_servers.codex_tg_automations.args"])
 	}
-	if got := config["mcp_servers.codex_tg_automations.env.CTR_GO_AUTOMATIONS_DIR"]; got != `C:\profiles\desktop\.codex\automations` {
+	if got := config["mcp_servers.codex_tg_automations.env.CTR_GO_AUTOMATIONS_DIR"]; got != `C:\profiles\telegram\automations` {
 		t.Fatalf("automations dir = %#v", got)
 	}
 }
@@ -96,7 +96,7 @@ func TestAutomationMCPConfigIsInjectedIntoThreadStartAndResume(t *testing.T) {
 
 	client := NewClient("codex", "stdio://", t.TempDir(), time.Second, ClientOptions{
 		AutomationCommand: `C:\apps\codex-tg\ctr-go.exe`,
-		AutomationsDir:    `C:\profiles\desktop\.codex\automations`,
+		AutomationsDir:    `C:\profiles\telegram\automations`,
 	})
 	for operation, params := range map[string]map[string]any{
 		"start":  client.threadStartParams(`C:\workspace`),

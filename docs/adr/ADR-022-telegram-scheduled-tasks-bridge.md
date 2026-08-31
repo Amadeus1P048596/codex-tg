@@ -1,8 +1,13 @@
 # ADR-022: Telegram Scheduled Tasks Bridge
 
-- Status: accepted
+- Status: superseded by ADR-023
 - Amends: ADR-019
 - Related: `docs/process/telegram-scheduled-tasks-brief.md`
+
+ADR-022 records the original Desktop-store bridge. Runtime investigation showed
+that writing a native-looking file does not perform the Desktop host's private
+task-registration lifecycle and cannot route a run back into Telegram. ADR-023
+therefore replaces the shared-store design with a Telegram-owned scheduler.
 
 ## Context
 

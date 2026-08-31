@@ -55,8 +55,8 @@ This file now serves two purposes:
   interactively or receive all important values through flags.
 - macOS service lifecycle commands are `ctr-go service start|stop|restart|status|enable-login|disable-login|uninstall`.
 - `CTR_GO_CONFIG` points at an alternate config file.
-- `CTR_GO_AUTOMATIONS_DIR` explicitly enables the Codex Desktop Scheduled task
-  definition bridge; existing configs without it stay disabled.
+- `CTR_GO_AUTOMATIONS_DIR` points to the TG-private Scheduled task store and
+  defaults under `CTR_GO_HOME`; it must not be shared with Codex Desktop.
 - Config precedence is explicit environment variables, then config file values, then built-in defaults.
 - Config files use simple `.env` style `KEY=VALUE` entries; comments and quoted values are supported, but shell expansion is not.
 - Runtime proxy env can be stored in the private config and applied after
@@ -103,14 +103,17 @@ Skills and ecosystem:
 Scheduled tasks:
 
 - new and resumed Telegram threads receive a private stdio
-  `automation_update` MCP tool only when `CTR_GO_AUTOMATIONS_DIR` is configured
-- the tool reads and writes native Codex automation definitions; it does not
-  introduce a second task format or scheduler
+  `automation_update` MCP tool backed by `CTR_GO_AUTOMATIONS_DIR`
+- the tool reads and writes validated codex-tg-owned cron definitions without
+  reading or writing the Desktop task store
 - Telegram-created schedules are standalone local `cron` tasks; `heartbeat`
-  is rejected because Telegram thread ids are not Desktop thread ids
-- Codex Desktop owns schedule execution, run history, UI, and notifications and
-  must be running for local tasks
-- Scheduled run output is not synthesized as a Telegram runtime turn
+  is rejected because every occurrence must start with isolated conversation state
+- the daemon evaluates local-time schedules every 15 seconds and durably claims
+  a task/time-slot in SQLite before dispatch
+- each due occurrence becomes a new thread and turn in the Telegram-private App
+  Server using the saved prompt, model, reasoning effort, and optional cwd
+- scheduled threads do not replace the current Telegram binding; normal
+  observer, Home, inbox, approval/input, and terminal paths provide visibility
 - task ids and paths are validated, unknown native TOML fields survive updates,
   and automation prompts must not contain credentials
 

@@ -16,10 +16,102 @@ import (
 	"unicode/utf8"
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
+	"github.com/mideco-tech/codex-tg/internal/automation"
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/control"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
+
+func TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	location := time.FixedZone("UTC+8", 8*60*60)
+	createdAt := time.Date(2026, 8, 31, 9, 0, 0, 0, location)
+	now := time.Date(2026, 8, 31, 9, 30, 5, 0, location)
+	service.now = func() time.Time { return now }
+	service.cfg.AutomationsDir = filepath.Join(service.cfg.Paths.Home, "automations")
+	automationStore := automation.NewStore(service.cfg.AutomationsDir, func() time.Time { return createdAt })
+	created, err := automationStore.Apply(map[string]any{
+		"mode": "create", "name": "Morning check", "prompt": "Check the project and report.",
+		"rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=30", "status": "ACTIVE", "kind": "cron",
+		"projectId": nil, "model": "gpt-scheduled", "reasoningEffort": "high", "executionEnvironment": "local",
+	})
+	if err != nil {
+		t.Fatalf("create automation failed: %v", err)
+	}
+	taskID, _ := created["id"].(string)
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "scheduled-thread", "cwd": service.cfg.DefaultCWD}},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	service.runAutomationTick(context.Background())
+	service.runAutomationTick(context.Background())
+
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != service.cfg.DefaultCWD {
+		t.Fatalf("threadStartCalls = %#v, want one isolated background thread in default cwd", stub.threadStartCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one scheduled turn", stub.turnStartCalls)
+	}
+	call := stub.turnStartCalls[0]
+	if call.threadID != "scheduled-thread" || call.message != "Check the project and report." || call.model != "gpt-scheduled" || call.reasoningEffort != "high" {
+		t.Fatalf("turn call = %#v, want prompt/model/reasoning from task", call)
+	}
+	if binding, err := service.store.GetBinding(context.Background(), 123456789, 0); err != nil || binding != nil {
+		t.Fatalf("binding = %#v err=%v, scheduled run must stay in the background", binding, err)
+	}
+	raw, err := service.store.GetState(context.Background(), automationRunStateKey(taskID))
+	if err != nil || !strings.Contains(raw, `"status":"running"`) || !strings.Contains(raw, `"thread_id":"scheduled-thread"`) {
+		t.Fatalf("run state = %q err=%v, want durable running claim", raw, err)
+	}
+}
+
+func TestNewRejectsConventionalDesktopAutomationStore(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir failed: %v", err)
+	}
+	service, err := New(config.Config{
+		Paths:          config.Paths{Home: root, DataDir: filepath.Join(root, "data"), LogDir: filepath.Join(root, "logs"), DBPath: filepath.Join(root, "data", "state.sqlite")},
+		AutomationsDir: filepath.Join(userHome, ".codex", "automations"),
+	})
+	if service != nil {
+		_ = service.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "must not share") {
+		t.Fatalf("New error = %v, want fail-closed Desktop store rejection", err)
+	}
+}
+
+func TestAutomationRunStateFollowsTerminalAppServerSnapshot(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "scheduled-terminal", Title: "Scheduled report", Status: "completed"}
+	if err := service.store.SetState(ctx, automationThreadStateKey(thread.ID), "daily-report"); err != nil {
+		t.Fatalf("SetState(thread task) failed: %v", err)
+	}
+	if err := service.saveAutomationRunState(ctx, "daily-report", automationRunState{
+		SlotUnixMilli: 123, Status: "running", ThreadID: thread.ID, TurnID: "scheduled-turn", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("saveAutomationRunState failed: %v", err)
+	}
+	snapshot := &appserver.ThreadReadSnapshot{LatestTurnID: "scheduled-turn", LatestTurnStatus: "completed"}
+
+	service.updateAutomationRunFromSnapshot(ctx, thread, snapshot)
+
+	state := service.loadAutomationRunState(ctx, "daily-report")
+	if state.Status != "completed" || state.ThreadID != thread.ID || state.TurnID != "scheduled-turn" {
+		t.Fatalf("run state = %#v, want completed scheduled run", state)
+	}
+}
 
 func TestHandleMessageWithLocalImageStartsRichTurn(t *testing.T) {
 	t.Parallel()

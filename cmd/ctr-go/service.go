@@ -109,7 +109,7 @@ func parseServiceInstallOptions(args []string) (serviceInstallOptions, error) {
 	fs.StringVar(&opts.DefaultCWD, "default-cwd", "", "default Codex working directory")
 	fs.StringVar(&opts.CodexChatsRoot, "codex-chats-root", "", "Codex UI Chats root")
 	fs.StringVar(&opts.CodexHome, "codex-home", "", "isolated Telegram Codex runtime home")
-	fs.StringVar(&opts.AutomationsDir, "automations-dir", "", "Codex Desktop Scheduled tasks directory")
+	fs.StringVar(&opts.AutomationsDir, "automations-dir", "", "Telegram Scheduled tasks directory")
 	fs.StringVar(&opts.CodexBin, "codex-bin", "", "Codex binary path")
 	fs.StringVar(&opts.NotifyNewRun, "notify-new-run", "", "notify on New run")
 	fs.StringVar(&opts.CTRGoBinaryPath, "ctr-go-bin", opts.CTRGoBinaryPath, "ctr-go binary path for LaunchAgent")
@@ -193,7 +193,7 @@ func runServiceInstall(args []string, in io.Reader, out io.Writer) error {
 	_, _ = fmt.Fprintf(out, "  Default cwd: %s\n", values["CTR_GO_DEFAULT_CWD"])
 	_, _ = fmt.Fprintf(out, "  Codex Chats root: %s\n", values["CTR_GO_CODEX_CHATS_ROOT"])
 	_, _ = fmt.Fprintf(out, "  Telegram Codex runtime home: %s\n", values["CTR_GO_CODEX_HOME"])
-	_, _ = fmt.Fprintf(out, "  Codex Desktop Scheduled tasks: %s\n", values["CTR_GO_AUTOMATIONS_DIR"])
+	_, _ = fmt.Fprintf(out, "  Telegram Scheduled tasks: %s\n", values["CTR_GO_AUTOMATIONS_DIR"])
 	_, _ = fmt.Fprintf(out, "  Codex binary: %s\n", values["CTR_GO_CODEX_BIN"])
 	_, _ = fmt.Fprintf(out, "  New run notifications: %s\n", values["CTR_GO_NOTIFY_NEW_RUN"])
 	_, _ = fmt.Fprintln(out, "\nNext steps")
@@ -318,8 +318,8 @@ func runServiceWizard(values map[string]string, in io.Reader, out io.Writer) (ma
 		{
 			Key:      "CTR_GO_AUTOMATIONS_DIR",
 			Step:     "7/9",
-			Label:    "Codex Desktop Scheduled tasks directory",
-			Help:     "Points to the Desktop automation store, usually ~/.codex/automations. Leave it configured to create standalone Scheduled tasks from Telegram.",
+			Label:    "Telegram Scheduled tasks directory",
+			Help:     "Private codex-tg task store, usually ~/.codex-tg/automations. Do not point it at the Codex Desktop automation directory.",
 			Required: true,
 			Validate: validateNonEmpty,
 		},

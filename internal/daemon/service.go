@@ -83,6 +83,7 @@ type Service struct {
 	cancel                   context.CancelFunc
 	wg                       sync.WaitGroup
 	panelMu                  sync.Mutex
+	automationMu             sync.Mutex
 	sender                   Sender
 	logger                   *log.Logger
 	diagnosticMu             sync.Mutex
@@ -120,6 +121,9 @@ var (
 )
 
 func New(cfg config.Config) (*Service, error) {
+	if config.IsDesktopAutomationsDir(cfg.AutomationsDir) {
+		return nil, errors.New("Telegram Scheduled tasks must not share the conventional Codex Desktop automation store; use a private directory such as ~/.codex-tg/automations")
+	}
 	if err := cfg.Paths.Ensure(); err != nil {
 		return nil, err
 	}
@@ -226,6 +230,9 @@ func (s *Service) Start(ctx context.Context) error {
 	s.spawn(runCtx, s.deliveryLoop)
 	s.spawn(runCtx, s.controlLoop)
 	s.spawn(runCtx, s.telegramWriterIdleLoop)
+	if strings.TrimSpace(s.cfg.AutomationsDir) != "" {
+		s.spawn(runCtx, s.automationLoop)
+	}
 	return nil
 }
 
@@ -1365,6 +1372,7 @@ func (s *Service) pollTracked(ctx context.Context) {
 			nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(30 * time.Second).Format(time.RFC3339Nano))
 		}
 		_ = s.store.UpsertSnapshot(ctx, current.Thread.ID, nextSnapshot)
+		s.updateAutomationRunFromSnapshot(ctx, current.Thread, &current)
 		s.logObserverSyncResult("poll_tracked", current)
 		s.maybeLogTelegramOriginTerminal(ctx, current)
 		if catchup || s.threadNeedsLiveSync(ctx, current.Thread.ID) || snapshotHasPassiveChange(latestSnapshot, &current) {

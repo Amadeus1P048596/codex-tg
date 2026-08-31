@@ -155,6 +155,27 @@ func TestStoreRequiresNativeCronRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestStoreMarksTasksAsTelegramOwnedAndPersistsCWD(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir(), time.Now)
+	created, err := store.Apply(map[string]any{
+		"mode": "create", "name": "Repository check", "prompt": "Review the repository.",
+		"rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=30", "status": "ACTIVE", "kind": "cron",
+		"projectId": nil, "cwd": `C:\work\project`, "model": "gpt-test", "reasoningEffort": "medium",
+		"executionEnvironment": "local",
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if created["owner"] != "codex-tg" {
+		t.Fatalf("owner = %#v, want codex-tg", created["owner"])
+	}
+	if created["cwd"] != `C:\work\project` {
+		t.Fatalf("cwd = %#v, want task working directory", created["cwd"])
+	}
+}
+
 func TestStoreHidesAndProtectsDesktopHeartbeatTasks(t *testing.T) {
 	t.Parallel()
 

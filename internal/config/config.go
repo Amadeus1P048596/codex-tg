@@ -135,7 +135,7 @@ func fromSource(source envSource) Config {
 		Paths:                       paths,
 		CodexBin:                    codexBin,
 		CodexHome:                   source.path("CTR_GO_CODEX_HOME", ""),
-		AutomationsDir:              source.path("CTR_GO_AUTOMATIONS_DIR", ""),
+		AutomationsDir:              source.path("CTR_GO_AUTOMATIONS_DIR", filepath.Join(paths.Home, "automations")),
 		AppServerListen:             listen,
 		FullAccess:                  source.bool("CTR_GO_FULL_ACCESS", false),
 		TelegramBotToken:            source.first("CTR_GO_TELEGRAM_BOT_TOKEN", "CTR_TELEGRAM_BOT_TOKEN"),
@@ -220,11 +220,20 @@ func DefaultCodexChatsRoot() string {
 }
 
 func DefaultAutomationsDir() string {
+	return filepath.Join(DefaultPaths().Home, "automations")
+}
+
+func IsDesktopAutomationsDir(path string) bool {
 	userHome, _ := os.UserHomeDir()
-	if strings.TrimSpace(userHome) == "" {
-		return filepath.Join(".codex", "automations")
+	if strings.TrimSpace(userHome) == "" || strings.TrimSpace(path) == "" {
+		return false
 	}
-	return filepath.Join(userHome, ".codex", "automations")
+	configured := filepath.Clean(path)
+	desktop := filepath.Clean(filepath.Join(userHome, ".codex", "automations"))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(configured, desktop)
+	}
+	return configured == desktop
 }
 
 func ConfigFilePath() string {

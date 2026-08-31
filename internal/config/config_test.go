@@ -22,6 +22,34 @@ func TestFromEnvReadsCodexChatsRoot(t *testing.T) {
 	}
 }
 
+func TestFromEnvDefaultsAutomationsInsideTelegramHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "telegram-home")
+	t.Setenv("CTR_GO_CONFIG", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("CTR_GO_HOME", home)
+	t.Setenv("CTR_GO_AUTOMATIONS_DIR", "")
+
+	cfg := FromEnv()
+	want := filepath.Join(home, "automations")
+	if cfg.AutomationsDir != want {
+		t.Fatalf("AutomationsDir = %q, want isolated Telegram path %q", cfg.AutomationsDir, want)
+	}
+}
+
+func TestIsDesktopAutomationsDirRejectsConventionalSharedStore(t *testing.T) {
+	t.Parallel()
+
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir failed: %v", err)
+	}
+	if !IsDesktopAutomationsDir(filepath.Join(userHome, ".codex", "automations")) {
+		t.Fatal("conventional Desktop automation store was not detected")
+	}
+	if IsDesktopAutomationsDir(filepath.Join(userHome, ".codex-tg", "automations")) {
+		t.Fatal("Telegram-private automation store was mistaken for Desktop")
+	}
+}
+
 func TestMarshalJSONIncludesNotifyNewRun(t *testing.T) {
 	t.Parallel()
 
@@ -121,7 +149,7 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	envDefaultCWD := filepath.Join(dir, "from-env")
 	home := filepath.Join(dir, "home")
 	codexHome := filepath.Join(dir, "codex-home")
-	automationsDir := filepath.Join(dir, "desktop-automations")
+	automationsDir := filepath.Join(dir, "telegram-automations")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
 		`CTR_GO_HOME="` + home + `"`,
 		`CTR_GO_CODEX_HOME="` + codexHome + `"`,

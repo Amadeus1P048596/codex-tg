@@ -19,9 +19,9 @@ go run ./cmd/ctr-go doctor
 `CTR_GO_CODEX_HOME` to `~/.codex-tg/codex-home`. This keeps Telegram sessions,
 state databases, writer locks, caches, and App Server processes separate from
 Codex Desktop. Provision Codex authentication in that private home before
-starting the daemon. The wizard also proposes `~/.codex/automations` for the
-optional Desktop Scheduled tasks bridge; existing configs must add
-`CTR_GO_AUTOMATIONS_DIR` explicitly.
+starting the daemon. Scheduled tasks use the separate
+`~/.codex-tg/automations` directory and the TG daemon's own scheduler; do not
+reuse the Codex Desktop automation directory.
 
 For manual setup on any OS:
 
@@ -45,7 +45,7 @@ $env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
 $env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
 $env:CTR_GO_CODEX_CHATS_ROOT = "C:\Users\you\Documents\Codex"
 $env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
-$env:CTR_GO_AUTOMATIONS_DIR = "C:\Users\you\.codex\automations"
+$env:CTR_GO_AUTOMATIONS_DIR = "C:\Users\you\.codex-tg\automations"
 # Optional: set to "off" to keep New run visible but silent.
 $env:CTR_GO_NOTIFY_NEW_RUN = "on"
 ```

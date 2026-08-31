@@ -287,7 +287,7 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	automationsDir, err := prompt(reader, out, "Codex Desktop Scheduled tasks directory", config.DefaultAutomationsDir())
+	automationsDir, err := prompt(reader, out, "Telegram Scheduled tasks directory", config.DefaultAutomationsDir())
 	if err != nil {
 		return err
 	}

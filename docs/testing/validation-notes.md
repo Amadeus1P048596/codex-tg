@@ -1,5 +1,20 @@
 # Validation Notes
 
+- 2026-08-31 CST Telegram-native scheduling investigation confirmed that the
+  prior bridge only wrote files into the Desktop automation directory. The
+  missed due task had no Desktop run event, and codex-tg had no scheduler or
+  result-routing code; an external file write had bypassed Desktop's host-owned
+  registration lifecycle. The replacement uses a TG-private task directory,
+  local RRULE evaluation, durable SQLite time-slot claims, and a fresh
+  TG-private App Server thread per occurrence. Targeted RRULE/store/config/daemon
+  tests, full `go test ./...`, `go vet ./...`, `go build -buildvcs=false ./...`,
+  candidate status/MCP readback, `git diff --check`, and the public private-data
+  scan passed. The two Telegram-created cron definitions were moved out of the
+  Desktop store with a private recovery backup while Desktop heartbeat tasks
+  were left untouched. The rollback-capable candidate is staged, but live
+  due-run readback remains pending because the operator has not authorized a
+  daemon restart.
+
 - 2026-08-31 CST concurrent Home visibility validation reproduced that `/home`
   rendered only the foreground thread and durable attention count even while
   other reconciled sessions were running. Home now shows a bounded five-row

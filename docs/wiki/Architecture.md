@@ -49,12 +49,13 @@ capabilities such as Skills, plugins, packages, and global instructions. Durable
 cross-client memory uses a separate application-level store for user-approved
 facts and preferences; it does not link either runtime's built-in memory DB.
 
-An optional Scheduled tasks bridge is the one additional mutable boundary.
-When `CTR_GO_AUTOMATIONS_DIR` is configured, thread-scoped App Server config
-injects a private stdio MCP tool into new and resumed Telegram threads. The tool
-writes validated standalone cron definitions in the Desktop automation store.
-Desktop remains the only scheduler and owns run history, UI, and notifications;
-Telegram thread state and heartbeat continuation remain isolated. See ADR-022.
+Scheduled tasks follow the same runtime-isolation rule. Thread-scoped App Server
+config injects a private stdio MCP tool into new and resumed Telegram threads;
+the tool writes validated standalone cron definitions under the Telegram home.
+The daemon evaluates local-time RRULEs, durably claims due slots in SQLite, and
+starts each run as a new TG-private App Server thread. Observer/Home/inbox own
+Telegram visibility. Desktop task definitions and scheduling are not read or
+written. See ADR-023.
 
 ADR-019 allows future work to prepare official App Server `unix://` and
 `app-server proxy` transports when they improve lifecycle safety.
@@ -89,4 +90,4 @@ message ids, outside the control core wherever practical.
 
 - [Control Plane](Control-Plane.md)
 - [ADR-019: Codex Control Plane](../adr/ADR-019-codex-control-plane.md)
-- [ADR-022: Telegram Scheduled Tasks Bridge](../adr/ADR-022-telegram-scheduled-tasks-bridge.md)
+- [ADR-023: Telegram-Native Scheduled Tasks](../adr/ADR-023-telegram-native-scheduled-tasks.md)

@@ -169,6 +169,7 @@ func (s *Store) update(args map[string]any) (map[string]any, error) {
 		"prompt":               "prompt",
 		"rrule":                "rrule",
 		"status":               "status",
+		"cwd":                  "cwd",
 		"model":                "model",
 		"reasoningEffort":      "reasoning_effort",
 		"executionEnvironment": "execution_environment",
@@ -322,6 +323,7 @@ func validatedCreateFields(args map[string]any) (map[string]any, error) {
 	}
 	fields := map[string]any{
 		"kind":                  "cron",
+		"owner":                 "codex-tg",
 		"name":                  strings.TrimSpace(stringArg(args, "name")),
 		"prompt":                strings.TrimSpace(stringArg(args, "prompt")),
 		"rrule":                 strings.TrimSpace(stringArg(args, "rrule")),
@@ -341,6 +343,7 @@ func validatedCreateFields(args map[string]any) (map[string]any, error) {
 		}
 	}
 	for _, pair := range [][2]string{
+		{"cwd", "cwd"},
 		{"model", "model"},
 		{"reasoningEffort", "reasoning_effort"},
 		{"executionEnvironment", "execution_environment"},
@@ -386,7 +389,7 @@ func validateField(name, value string) error {
 		if value != "failed_runs_only" {
 			return errors.New("notificationPolicy must be failed_runs_only or null")
 		}
-	case "model", "reasoning_effort", "project_id":
+	case "model", "reasoning_effort", "project_id", "cwd":
 		if value == "" {
 			return fmt.Errorf("%s cannot be empty", name)
 		}
@@ -519,7 +522,7 @@ type automationDocument struct {
 func newAutomationDocument(fields map[string]any) *automationDocument {
 	doc := &automationDocument{index: map[string]int{}}
 	order := []string{
-		"version", "id", "kind", "name", "prompt", "status", "rrule", "project_id",
+		"version", "id", "kind", "owner", "name", "prompt", "status", "rrule", "cwd", "project_id",
 		"model", "reasoning_effort", "notification_policy", "execution_environment",
 		"created_at", "updated_at",
 	}

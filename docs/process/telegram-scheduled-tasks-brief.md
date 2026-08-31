@@ -1,49 +1,61 @@
-# Telegram Scheduled Tasks Bridge Brief
+# Telegram-Native Scheduled Tasks Brief
 
 ## Problem
 
-Codex Desktop injects its private `automation_update` tool into Desktop-hosted
-threads. Telegram uses a separate App Server and `CODEX_HOME`, so its threads do
-not receive that tool and cannot create native Scheduled tasks.
+The original bridge wrote task files into the Codex Desktop automation store.
+That bypassed Desktop's host-owned registration lifecycle, so a definition could
+exist without ever becoming runnable. Desktop-owned execution also had no
+authoritative path back to the isolated Telegram runtime or its observer.
 
 ## Goal
 
-A Telegram Codex thread can create, view, update, list, and delete standalone
-Codex Desktop Scheduled tasks without sharing Desktop sessions or adding a
-second scheduler.
+A Telegram Codex thread can create, view, update, list, delete, execute, and
+receive results for standalone scheduled tasks without depending on or sharing
+mutable state with Codex Desktop.
 
 ## Non-goals
 
-- Sharing Desktop thread history, runtime SQLite, writer locks, or caches.
-- Creating heartbeat tasks attached to a Telegram thread.
-- Executing schedules or mirroring Scheduled run output into Telegram.
+- Sharing Desktop thread history, task definitions, SQLite, writer locks, or caches.
+- Creating heartbeat tasks attached to an existing thread.
+- Mirroring Desktop Scheduled history or notifications.
 - Exposing an App Server or MCP listener on the network.
 
 ## Operator Flow
 
-The operator configures `CTR_GO_AUTOMATIONS_DIR`, normally pointing at the
-Desktop `~/.codex/automations` directory, and asks Codex in Telegram for a
-recurring standalone task. The injected tool writes a native cron definition.
-Codex Desktop remains responsible for execution, history, UI, and notifications.
+The operator asks Codex in Telegram for a recurring task. The injected MCP tool
+writes a validated cron definition under `~/.codex-tg/automations` by default.
+The daemon claims each due local-time slot in SQLite, starts a new background
+thread/turn in the TG-private App Server, and sends lifecycle/result visibility
+through the normal observer, `/home`, and `/inbox` behavior.
 
 ## Architecture
 
-`internal/automation` owns a narrow native-store adapter and stdio MCP server.
-`internal/appserver` injects that MCP server through thread-scoped config on
-both `thread/start` and `thread/resume`. Existing configs stay disabled until
-the directory is explicitly set.
+`internal/automation` owns the safe definition store and RRULE calculation.
+`internal/appserver` injects the task-management MCP server into new and resumed
+Telegram threads. `internal/daemon` owns polling, durable slot claims, new
+thread/turn dispatch, and failure notification. App Server remains authoritative
+for the scheduled thread after dispatch.
 
 ## Testing
 
-- Store CRUD preserves unknown native TOML fields and validates safe ids/RRULEs.
-- MCP handshake, tool discovery, success, and error responses are covered.
-- App Server config injection and private config loading are covered.
-- Full Go tests/build, direct stdio MCP smoke, native-store smoke, and a targeted
-  private-data scan are required before release.
+- Store CRUD preserves unknown fields, marks new tasks as Telegram-owned, and
+  validates safe ids/RRULEs.
+- RRULE tests cover local wall clock, update boundaries, hourly intervals, and
+  weekly intervals.
+- Daemon regression proves one due slot starts exactly one unbound background
+  thread with the task prompt/model/reasoning settings.
+- MCP handshake, tool discovery, config injection, full Go tests/build, and a
+  targeted private-data scan remain required.
+- Live Telegram completion readback is required after an operator-approved
+  daemon restart.
 
 ## Acceptance Criteria
 
 - [x] New and resumed Telegram threads receive `automation_update` when enabled.
-- [x] Created tasks use native cron fields and a local execution environment.
+- [x] New tasks live in the TG-private store and carry an ownership marker.
 - [x] Heartbeat tasks and unsafe paths are rejected.
-- [x] Disabling the directory removes the tool and Desktop write boundary.
+- [x] Due occurrences are durably claimed and dispatched once.
+- [x] Scheduled runs use new TG-private App Server threads and never change the
+  current Telegram binding.
+- [ ] A real due task completes and produces Telegram readback after the pending
+  operator-approved deployment.
