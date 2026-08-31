@@ -368,6 +368,36 @@ func (c *Client) SendDocument(ctx context.Context, chatID, topicID int64, docume
 	return &message, nil
 }
 
+func (c *Client) SendPhoto(ctx context.Context, chatID, topicID int64, photo DocumentFile, caption string, markup *InlineKeyboardMarkup, options model.SendOptions) (*Message, error) {
+	if strings.TrimSpace(photo.Name) == "" {
+		photo.Name = "codex-image.png"
+	}
+	fields := map[string]string{
+		"chat_id": strconvFormatInt(chatID),
+	}
+	if topicID != 0 {
+		fields["message_thread_id"] = strconvFormatInt(topicID)
+	}
+	if options.Silent {
+		fields["disable_notification"] = "true"
+	}
+	if strings.TrimSpace(caption) != "" {
+		fields["caption"] = caption
+	}
+	if markup != nil {
+		encoded, err := json.Marshal(markup)
+		if err != nil {
+			return nil, err
+		}
+		fields["reply_markup"] = string(encoded)
+	}
+	var message Message
+	if err := c.callMultipart(ctx, "sendPhoto", fields, "photo", photo, &message); err != nil {
+		return nil, err
+	}
+	return &message, nil
+}
+
 func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackQueryID, text string, showAlert bool) error {
 	request := answerCallbackQueryRequest{
 		CallbackQueryID: callbackQueryID,

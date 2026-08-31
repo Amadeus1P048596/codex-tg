@@ -11,6 +11,8 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
+const maxOutputImagesPerTurn = 4
+
 type ThreadReadSnapshot struct {
 	Thread                    model.Thread
 	LatestTurnID              string
@@ -28,6 +30,7 @@ type ThreadReadSnapshot struct {
 	LatestUserMessageFP       string
 	LatestFinalFP             string
 	LatestFinalText           string
+	LatestOutputImages        []OutputImage
 	LatestToolID              string
 	LatestToolKind            string
 	LatestToolLabel           string
@@ -39,6 +42,18 @@ type ThreadReadSnapshot struct {
 	LatestToolUpdatedAt       string
 	PlanPrompt                *model.PlanPrompt
 	DetailItems               []model.DetailItem
+}
+
+// OutputImage is an image produced by the latest Codex turn. Path is the
+// App Server-owned savedPath when available; Result is the protocol's base64
+// fallback. Revised generation prompts are deliberately not retained because
+// Telegram delivery does not need to disclose them.
+type OutputImage struct {
+	ID          string `json:"id,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Result      string `json:"result,omitempty"`
+	Caption     string `json:"caption,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 type AgentMessageEntry struct {
@@ -143,6 +158,7 @@ func SnapshotFromThreadRead(result map[string]any) ThreadReadSnapshot {
 	finalText, finalFP := latestFinalAgentMessage(items)
 	snapshot.LatestFinalText = finalText
 	snapshot.LatestFinalFP = finalFP
+	snapshot.LatestOutputImages = collectOutputImagesFromItems(items)
 	normalizeFinalizedTurn(&snapshot)
 	for i := len(items) - 1; i >= 0; i-- {
 		item, _ := items[i].(map[string]any)
@@ -171,6 +187,82 @@ func SnapshotFromThreadRead(result map[string]any) ThreadReadSnapshot {
 		}
 	}
 	return snapshot
+}
+
+func collectOutputImagesFromItems(items []any) []OutputImage {
+	out := make([]OutputImage, 0)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		itemType := strings.TrimSpace(stringValue(item["type"], ""))
+		if itemType == "dynamicToolCall" {
+			out = append(out, collectDynamicToolOutputImages(item)...)
+			if len(out) >= maxOutputImagesPerTurn {
+				return out[:maxOutputImagesPerTurn]
+			}
+			continue
+		}
+		if itemType != "imageGeneration" {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(stringValue(item["status"], "")))
+		if item["failure"] != nil || status == "failed" || status == "cancelled" || status == "canceled" || status == "running" || status == "inprogress" || status == "pending" {
+			continue
+		}
+		path := strings.TrimSpace(stringValue(item["savedPath"], ""))
+		result := strings.TrimSpace(stringValue(item["result"], ""))
+		if path == "" && result == "" {
+			continue
+		}
+		id := strings.TrimSpace(stringValue(item["id"], ""))
+		storedResult := result
+		if path != "" {
+			// savedPath is the delivery authority and avoids duplicating a large
+			// base64 result in the compact SQLite observer snapshot.
+			storedResult = ""
+		}
+		out = append(out, OutputImage{
+			ID:          id,
+			Path:        path,
+			Result:      storedResult,
+			Caption:     "Codex 生成的图片",
+			Fingerprint: fingerprint("imageGeneration", id, path, result),
+		})
+		if len(out) >= maxOutputImagesPerTurn {
+			return out
+		}
+	}
+	return out
+}
+
+func collectDynamicToolOutputImages(item map[string]any) []OutputImage {
+	status := strings.ToLower(strings.TrimSpace(stringValue(item["status"], "")))
+	if status == "failed" || status == "running" || status == "inprogress" || status == "pending" {
+		return nil
+	}
+	if success, ok := item["success"].(bool); ok && !success {
+		return nil
+	}
+	contentItems, _ := item["contentItems"].([]any)
+	itemID := strings.TrimSpace(stringValue(item["id"], ""))
+	out := make([]OutputImage, 0)
+	for index, rawContent := range contentItems {
+		content, _ := rawContent.(map[string]any)
+		if strings.TrimSpace(stringValue(content["type"], "")) != "inputImage" {
+			continue
+		}
+		imageURL := strings.TrimSpace(stringValue(content["imageUrl"], ""))
+		if imageURL == "" {
+			continue
+		}
+		id := fmt.Sprintf("%s:%d", itemID, index)
+		out = append(out, OutputImage{
+			ID:          id,
+			Result:      imageURL,
+			Caption:     "Codex 生成的图片",
+			Fingerprint: fingerprint("dynamicToolCallImage", id, imageURL),
+		})
+	}
+	return out
 }
 
 func normalizeFinalizedTurn(snapshot *ThreadReadSnapshot) {

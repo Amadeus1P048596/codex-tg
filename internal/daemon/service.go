@@ -30,6 +30,7 @@ type Sender interface {
 	EditRenderedMessage(ctx context.Context, chatID, topicID, messageID int64, rendered model.RenderedMessage, buttons [][]model.ButtonSpec) error
 	DeleteMessage(ctx context.Context, chatID, topicID, messageID int64) error
 	SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error)
+	SendPhotoData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error)
 }
 
 type chatActionSender interface {

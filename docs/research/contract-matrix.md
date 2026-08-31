@@ -197,6 +197,13 @@ Adapter routing:
 - Private Telegram photo inputs remain readable for 30 minutes after dispatch
   because App Server ingestion may be asynchronous; scheduled cleanup removes
   them, and matching files older than 24 hours are treated as stale.
+- Successful latest-turn App Server `imageGeneration` items and completed
+  dynamic-tool `inputImage` content are delivered to the routed Telegram
+  chat/topic through `sendPhoto`. Explicit Markdown images are eligible only
+  inside the thread cwd; remote URLs and cwd escapes fail closed. Successful
+  thread/turn/image delivery fingerprints are durable and internal generation
+  prompts are not captions. Final-card text removes local image targets while
+  preserving their human labels.
 - Outside fenced code blocks, GitHub-style Markdown pipe tables render as
   per-row Telegram list records rather than raw aligned text. The first column
   is the record title and remaining columns are vertically labeled fields.

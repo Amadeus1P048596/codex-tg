@@ -1,5 +1,19 @@
 # Validation Notes
 
+- 2026-08-31 CST Codex-to-Telegram image-output validation confirmed that the
+  bridge normalized only text replies and exposed no Telegram `sendPhoto`
+  sender method. The fix now forwards terminal `imageGeneration` items,
+  completed dynamic-tool `inputImage` data, and cwd-confined explicit Markdown
+  images as silent, durably de-duplicated photo companions. Failed delivery is
+  retryable; failed/in-progress outputs, remote Markdown URLs, cwd escapes,
+  unsupported/oversized data, and internal generation prompts fail closed.
+  Targeted tests, full `go test ./...`, `go vet ./...`, `go build
+  -buildvcs=false ./...`, `git diff --check`, and the public private-data scan
+  passed. A rollback-capable Windows candidate is staged with a 22:00-09:30
+  restart gate and five-minute health deadline, but the installed daemon was
+  not restarted; real Telegram image readback remains pending explicit operator
+  authorization.
+
 - 2026-08-31 CST Telegram-native scheduling investigation confirmed that the
   prior bridge only wrote files into the Desktop automation directory. The
   missed due task had no Desktop run event, and codex-tg had no scheduler or

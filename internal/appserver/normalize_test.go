@@ -2,6 +2,7 @@ package appserver
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -394,6 +395,105 @@ func TestSnapshotFromThreadReadKeepsAgentMessagePhasesAndFinalAnswerOnly(t *test
 	}
 	if got, want := snapshot.DetailItems[2].Kind, model.DetailItemFinal; got != want {
 		t.Fatalf("DetailItems[2].Kind = %q, want %q", got, want)
+	}
+}
+
+func TestSnapshotFromThreadReadCollectsCompletedImageGenerationOutputs(t *testing.T) {
+	t.Parallel()
+
+	snapshot := SnapshotFromThreadRead(map[string]any{
+		"id":     "thread-images",
+		"name":   "Generate images",
+		"cwd":    `C:\Users\you\Projects\Codex`,
+		"status": "completed",
+		"turns": []any{
+			map[string]any{
+				"id":     "turn-images",
+				"status": "completed",
+				"items": []any{
+					map[string]any{
+						"id":            "image-ok",
+						"type":          "imageGeneration",
+						"status":        "completed",
+						"result":        "cG5nLWRhdGE=",
+						"savedPath":     `C:\Users\you\Projects\Codex\artifacts\result.png`,
+						"revisedPrompt": "private generation prompt",
+					},
+					map[string]any{
+						"id":      "image-failed",
+						"type":    "imageGeneration",
+						"status":  "failed",
+						"result":  "must-not-be-forwarded",
+						"failure": map[string]any{"type": "usageLimitExceeded"},
+					},
+					map[string]any{
+						"id":      "dynamic-image-ok",
+						"type":    "dynamicToolCall",
+						"status":  "completed",
+						"success": true,
+						"contentItems": []any{
+							map[string]any{"type": "inputText", "text": "generated"},
+							map[string]any{"type": "inputImage", "imageUrl": "data:image/png;base64,cG5nLWRhdGE="},
+						},
+					},
+					map[string]any{
+						"id":    "agent-final",
+						"type":  "agentMessage",
+						"phase": "final_answer",
+						"text":  "图片已经生成。",
+					},
+				},
+			},
+		},
+	})
+
+	if got, want := len(snapshot.LatestOutputImages), 2; got != want {
+		t.Fatalf("len(LatestOutputImages) = %d, want %d", got, want)
+	}
+	image := snapshot.LatestOutputImages[0]
+	if got, want := image.ID, "image-ok"; got != want {
+		t.Fatalf("image.ID = %q, want %q", got, want)
+	}
+	if got, want := image.Path, `C:\Users\you\Projects\Codex\artifacts\result.png`; got != want {
+		t.Fatalf("image.Path = %q, want %q", got, want)
+	}
+	if got := image.Result; got != "" {
+		t.Fatalf("image.Result = %q, want omitted when savedPath is available", got)
+	}
+	if strings.Contains(image.Caption, "private generation prompt") {
+		t.Fatalf("image.Caption = %q, want no generation prompt disclosure", image.Caption)
+	}
+	if strings.TrimSpace(image.Fingerprint) == "" {
+		t.Fatal("image.Fingerprint is empty")
+	}
+	dynamicImage := snapshot.LatestOutputImages[1]
+	if got, want := dynamicImage.ID, "dynamic-image-ok:1"; got != want {
+		t.Fatalf("dynamicImage.ID = %q, want %q", got, want)
+	}
+	if got, want := dynamicImage.Result, "data:image/png;base64,cG5nLWRhdGE="; got != want {
+		t.Fatalf("dynamicImage.Result = %q, want %q", got, want)
+	}
+}
+
+func TestSnapshotFromThreadReadCapsOutputImagesPerTurn(t *testing.T) {
+	t.Parallel()
+
+	items := make([]any, 0, 7)
+	for index := 0; index < 6; index++ {
+		items = append(items, map[string]any{
+			"id": "image-" + strconv.Itoa(index), "type": "imageGeneration",
+			"status": "completed", "result": "cG5nLWRhdGE=",
+		})
+	}
+	items = append(items, map[string]any{
+		"id": "agent-final", "type": "agentMessage", "phase": "final_answer", "text": "Done.",
+	})
+	snapshot := SnapshotFromThreadRead(map[string]any{
+		"id": "thread-images-capped", "status": "completed",
+		"turns": []any{map[string]any{"id": "turn-images-capped", "status": "completed", "items": items}},
+	})
+	if got, want := len(snapshot.LatestOutputImages), 4; got != want {
+		t.Fatalf("len(LatestOutputImages) = %d, want bounded %d", got, want)
 	}
 }
 

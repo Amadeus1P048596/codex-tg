@@ -507,3 +507,81 @@ func TestClientSendDocumentSilentSetsDisableNotification(t *testing.T) {
 		t.Fatalf("SendDocument failed: %v", err)
 	}
 }
+
+func TestClientSendPhotoUsesMultipartForm(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sendPhoto" {
+			t.Fatalf("path = %q, want /sendPhoto", r.URL.Path)
+		}
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("ParseMediaType failed: %v", err)
+		}
+		if mediaType != "multipart/form-data" {
+			t.Fatalf("mediaType = %q, want multipart/form-data", mediaType)
+		}
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		fields := map[string]string{}
+		var photoName, photoType string
+		var photoBody []byte
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("NextPart failed: %v", err)
+			}
+			data, err := io.ReadAll(part)
+			if err != nil {
+				t.Fatalf("ReadAll(part) failed: %v", err)
+			}
+			if part.FormName() == "photo" {
+				photoName = part.FileName()
+				photoType = part.Header.Get("Content-Type")
+				photoBody = data
+				continue
+			}
+			fields[part.FormName()] = string(data)
+		}
+		if got, want := fields["chat_id"], "42"; got != want {
+			t.Fatalf("chat_id = %q, want %q", got, want)
+		}
+		if got, want := fields["message_thread_id"], "9"; got != want {
+			t.Fatalf("message_thread_id = %q, want %q", got, want)
+		}
+		if got, want := fields["caption"], "Codex 图片"; got != want {
+			t.Fatalf("caption = %q, want %q", got, want)
+		}
+		if got, want := fields["disable_notification"], "true"; got != want {
+			t.Fatalf("disable_notification = %q, want %q", got, want)
+		}
+		if got, want := photoName, "result.png"; got != want {
+			t.Fatalf("filename = %q, want %q", got, want)
+		}
+		if got, want := photoType, "image/png"; got != want {
+			t.Fatalf("content-type = %q, want %q", got, want)
+		}
+		if got, want := string(photoBody), "png-payload"; got != want {
+			t.Fatalf("photo body = %q, want %q", got, want)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":503,"chat":{"id":42,"type":"private"}}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	message, err := client.SendPhoto(context.Background(), 42, 9, DocumentFile{
+		Name:        "result.png",
+		ContentType: "image/png",
+		Data:        []byte("png-payload"),
+	}, "Codex 图片", nil, model.SendOptions{Silent: true})
+	if err != nil {
+		t.Fatalf("SendPhoto failed: %v", err)
+	}
+	if message == nil || message.MessageID != 503 {
+		t.Fatalf("message = %#v, want message_id=503", message)
+	}
+}

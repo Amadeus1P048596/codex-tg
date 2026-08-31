@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Delivers completed Codex image-generation and dynamic-tool image outputs as
+  de-duplicated Telegram photos, with bounded decoding, workspace-confined
+  Markdown attachment paths, and no internal generation-prompt disclosure.
 - Replaces the unreliable Desktop Scheduled tasks file bridge with a
   Telegram-native scheduler: definitions live under `~/.codex-tg`, due slots
   are claimed in SQLite, and every occurrence starts a new TG-private App Server

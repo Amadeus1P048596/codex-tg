@@ -2,7 +2,8 @@
 
 - Status: accepted
 - Amends: ADR-003, ADR-004, ADR-008, ADR-010, ADR-013, ADR-015
-- Related: `docs/process/telegram-output-style-v2-brief.md`
+- Related: `docs/process/telegram-output-style-v2-brief.md`,
+  `docs/process/telegram-photo-output-bugfix.md`
 
 ## Context
 
@@ -44,6 +45,13 @@ derive user-facing activities without exposing each transport event.
 - Short task/run ids are bottom metadata. Full ids are opt-in diagnostics.
 - Long final answers complete the original card with a compact summary and may
   be delivered as separate rendered Result messages.
+- Successful images produced by the terminal turn are sent after its card or
+  compact background notice as silent Telegram photo companions. Durable
+  per-target/thread/turn/image fingerprints prevent poll or restart duplicates;
+  failed delivery stays retryable.
+- Explicit final-answer Markdown images are attachments only when their resolved
+  files remain inside the thread cwd. App Server-owned structured generated
+  image paths are authoritative for generated-artifact locations outside it.
 - Telegram photos are converted to App Server `localImage` inputs and enter the
   same single-card lifecycle; no media receipt card is added.
 - Each Telegram chat/topic has one foreground thread. Only that thread may show
@@ -82,6 +90,8 @@ derive user-facing activities without exposing each transport event.
   rows.
 - Existing Tool/Output rendering can remain behind explicit drill-down actions
   for diagnostics, but it is no longer part of the default turn chronology.
+- A turn can own a small number of photo companion messages in addition to its
+  stable activity card; those media do not reintroduce per-tool message spam.
 - A failed typing request produces the Working card immediately so a Telegram
   API degradation cannot leave the user with no feedback.
 - Session isolation means Desktop-only cached history is deliberately absent

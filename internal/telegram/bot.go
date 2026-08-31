@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -230,6 +231,24 @@ func (b *Bot) SendDocumentData(ctx context.Context, chatID, topicID int64, fileN
 	message, err := b.client.SendDocument(sendCtx, chatID, topicID, DocumentFile{
 		Name:        fileName,
 		ContentType: "application/octet-stream",
+		Data:        data,
+	}, strings.TrimSpace(caption), nil, options)
+	cancel()
+	if err != nil {
+		return 0, err
+	}
+	if message == nil {
+		return 0, nil
+	}
+	return message.MessageID, nil
+}
+
+func (b *Bot) SendPhotoData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error) {
+	contentType := http.DetectContentType(data)
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	message, err := b.client.SendPhoto(sendCtx, chatID, topicID, DocumentFile{
+		Name:        fileName,
+		ContentType: contentType,
 		Data:        data,
 	}, strings.TrimSpace(caption), nil, options)
 	cancel()

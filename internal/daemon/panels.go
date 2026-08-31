@@ -109,6 +109,9 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 	}
 	if !foreground {
 		s.handleBackgroundThreadSnapshotLocked(ctx, sender, target, *thread, snapshot, pending)
+		if err := s.maybeSendFinalImages(ctx, sender, target, *thread, snapshot); err != nil {
+			s.setError(ctx, err)
+		}
 		return
 	}
 
@@ -133,6 +136,9 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 	}
 	legacyTerminalReplay := existingPanel != nil && existingPanel.CurrentTurnID == strings.TrimSpace(snapshot.LatestTurnID) && isLegacyTerminalReplay(panel, snapshot)
 	if isTerminalStatus(snapshot.LatestTurnStatus) && strings.TrimSpace(snapshot.LatestFinalFP) != "" && panel.LastFinalNoticeFP == snapshot.LatestFinalFP {
+		if err := s.maybeSendFinalImages(ctx, sender, target, *thread, snapshot); err != nil {
+			s.setError(ctx, err)
+		}
 		return
 	}
 	if legacyTerminalReplay && snapshot.LatestFinalFP != "" {
@@ -140,10 +146,16 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 		if err := s.store.UpdateThreadPanelState(ctx, panel.ID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP); err != nil {
 			s.setError(ctx, err)
 		}
+		if err := s.maybeSendFinalImages(ctx, sender, target, *thread, snapshot); err != nil {
+			s.setError(ctx, err)
+		}
 		return
 	}
 	if shouldRenderFinalCardNow(panel, snapshot) {
 		if err := s.maybeRenderFinalCard(ctx, sender, target, panel, *thread, snapshot); err != nil {
+			s.setError(ctx, err)
+		}
+		if err := s.maybeSendFinalImages(ctx, sender, target, *thread, snapshot); err != nil {
 			s.setError(ctx, err)
 		}
 		return
@@ -165,6 +177,9 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 		}
 	}
 	if err := s.maybeRenderFinalCard(ctx, sender, target, panel, *thread, snapshot); err != nil {
+		s.setError(ctx, err)
+	}
+	if err := s.maybeSendFinalImages(ctx, sender, target, *thread, snapshot); err != nil {
 		s.setError(ctx, err)
 	}
 }

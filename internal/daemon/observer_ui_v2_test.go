@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,12 +38,38 @@ type recordedDocument struct {
 	options  model.SendOptions
 }
 
+type recordedPhoto struct {
+	chatID   int64
+	topicID  int64
+	fileName string
+	data     []byte
+	caption  string
+	options  model.SendOptions
+}
+
 type recordingSender struct {
 	messages  []recordedMessage
 	documents []recordedDocument
+	photos    []recordedPhoto
 	edits     []recordedMessage
 	deletes   []recordedMessage
 	editErr   error
+	photoErr  error
+}
+
+func (s *recordingSender) SendPhotoData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error) {
+	s.photos = append(s.photos, recordedPhoto{
+		chatID:   chatID,
+		topicID:  topicID,
+		fileName: fileName,
+		data:     append([]byte(nil), data...),
+		caption:  caption,
+		options:  options,
+	})
+	if s.photoErr != nil {
+		return 0, s.photoErr
+	}
+	return int64(len(s.photos)), nil
 }
 
 func (s *recordingSender) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error) {
@@ -263,6 +292,136 @@ func TestSyncThreadPanelDoesNotDuplicateFinalAnswerOnRepeatedSync(t *testing.T) 
 
 	if panel.LastFinalNoticeFP != "final-fp-1" {
 		t.Fatalf("panel LastFinalNoticeFP = %q, want final-fp-1", panel.LastFinalNoticeFP)
+	}
+}
+
+func TestSyncThreadPanelSendsGeneratedAndReferencedImagesOnce(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	projectDir := t.TempDir()
+	generatedPath := filepath.Join(projectDir, "generated.png")
+	codeExamplePath := filepath.Join(projectDir, "code-example.png")
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "private.png")
+	pngData := []byte("\x89PNG\r\n\x1a\ntelegram-image")
+	if err := os.WriteFile(generatedPath, pngData, 0o600); err != nil {
+		t.Fatalf("WriteFile(generated image) failed: %v", err)
+	}
+	if err := os.WriteFile(codeExamplePath, pngData, 0o600); err != nil {
+		t.Fatalf("WriteFile(code example image) failed: %v", err)
+	}
+	if err := os.WriteFile(outsidePath, pngData, 0o600); err != nil {
+		t.Fatalf("WriteFile(outside image) failed: %v", err)
+	}
+
+	thread := model.Thread{
+		ID:          "thread-output-image",
+		Title:       "Generate image",
+		ProjectName: "Codex",
+		CWD:         projectDir,
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-output-image",
+		LatestTurnStatus: "completed",
+		LatestFinalFP:    "final-output-image",
+		LatestFinalText:  "完成。\n\n![生成结果](" + generatedPath + ")\n\n![不应发送](" + outsidePath + ")\n\n```md\n![代码示例](" + codeExamplePath + ")\n```",
+		LatestOutputImages: []appserver.OutputImage{
+			{
+				ID:          "image-structured-path",
+				Path:        generatedPath,
+				Caption:     "Codex 生成的图片",
+				Fingerprint: "image-structured-path-fp",
+			},
+			{
+				ID:          "image-structured-base64",
+				Result:      "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngData),
+				Caption:     "Codex 生成的图片",
+				Fingerprint: "image-structured-base64-fp",
+			},
+		},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, Enabled: true}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+
+	if got, want := len(sender.photos), 2; got != want {
+		t.Fatalf("photo count = %d, want %d; photos=%#v", got, want, sender.photos)
+	}
+	for index, photo := range sender.photos {
+		if got, want := string(photo.data), string(pngData); got != want {
+			t.Fatalf("photos[%d].data = %q, want PNG payload", index, got)
+		}
+		if !photo.options.Silent {
+			t.Fatalf("photos[%d].options = %#v, want silent image companion", index, photo.options)
+		}
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("message count = %d, want one final card", len(sender.messages))
+	}
+	if strings.Contains(sender.messages[0].text, generatedPath) || strings.Contains(sender.messages[0].plainText, generatedPath) ||
+		strings.Contains(sender.messages[0].text, outsidePath) || strings.Contains(sender.messages[0].plainText, outsidePath) {
+		t.Fatalf("final card exposed a local image path: %#v", sender.messages[0])
+	}
+}
+
+func TestSyncThreadPanelRetriesFailedGeneratedImageWithoutDuplicatingFinalCard(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{photoErr: errors.New("temporary Telegram photo failure")}
+	service.SetSender(sender)
+	ctx := context.Background()
+	pngData := []byte("\x89PNG\r\n\x1a\nretry-image")
+	thread := model.Thread{
+		ID: "thread-output-image-retry", Title: "Retry image", ProjectName: "Codex",
+		CWD: t.TempDir(), UpdatedAt: time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread: thread, LatestTurnID: "turn-output-image-retry", LatestTurnStatus: "completed",
+		LatestFinalFP: "final-output-image-retry", LatestFinalText: "完成。",
+		LatestOutputImages: []appserver.OutputImage{{
+			ID: "image-retry", Result: base64.StdEncoding.EncodeToString(pngData),
+			Fingerprint: "image-retry-fp",
+		}},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, Enabled: true}
+
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	if got, want := len(sender.photos), 1; got != want {
+		t.Fatalf("photo attempts after failure = %d, want %d", got, want)
+	}
+	if got, want := len(sender.messages), 1; got != want {
+		t.Fatalf("final cards after failure = %d, want %d", got, want)
+	}
+
+	sender.photoErr = nil
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	if got, want := len(sender.photos), 2; got != want {
+		t.Fatalf("photo attempts after retry and re-poll = %d, want %d", got, want)
+	}
+	if got, want := len(sender.messages), 1; got != want {
+		t.Fatalf("final cards after retry and re-poll = %d, want %d", got, want)
 	}
 }
 

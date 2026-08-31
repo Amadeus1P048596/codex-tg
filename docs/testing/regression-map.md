@@ -570,6 +570,36 @@ Contract notes:
   photo first prompt. The title stage remains plain-text-only and must fail
   closed rather than misroute the photo.
 
+## Telegram Photo Output Safety
+
+Bug report: `docs/process/telegram-photo-output-bugfix.md`; lifecycle decision:
+`docs/adr/ADR-021-telegram-activity-card-lifecycle.md`.
+
+Primary tests:
+
+- `internal/appserver/normalize_test.go::TestSnapshotFromThreadReadCollectsCompletedImageGenerationOutputs`
+- `internal/appserver/normalize_test.go::TestSnapshotFromThreadReadCapsOutputImagesPerTurn`
+- `internal/telegram/api_test.go::TestClientSendPhotoUsesMultipartForm`
+- `internal/daemon/observer_ui_v2_test.go::TestSyncThreadPanelSendsGeneratedAndReferencedImagesOnce`
+- `internal/daemon/observer_ui_v2_test.go::TestSyncThreadPanelRetriesFailedGeneratedImageWithoutDuplicatingFinalCard`
+
+Contract notes:
+
+- Successful `imageGeneration` and dynamic-tool `inputImage` outputs from the
+  latest terminal turn become Telegram photos in the routed chat/topic, bounded
+  to four photos per turn.
+- Companion photos are silent and are de-duplicated durably by target,
+  thread, turn, and image fingerprint. Failed sends remain retryable.
+- Explicit Markdown image paths must resolve inside the thread cwd after
+  symlink evaluation. Structured App Server `savedPath` output remains the
+  authority for generated-artifact locations outside that boundary.
+- Remote Markdown URLs, failed/in-progress items, non-image data, oversized
+  payloads, and revised generation prompts are never forwarded.
+- Terminal-card rendering preserves Markdown image labels but strips their local
+  targets so photo delivery does not also disclose filesystem paths as links.
+- Markdown image syntax inside fenced code remains literal and is never treated
+  as an attachment.
+
 ## Diagnostics And Sanitization
 
 ADR: `docs/adr/ADR-012-turn-lifecycle-normalization.md`

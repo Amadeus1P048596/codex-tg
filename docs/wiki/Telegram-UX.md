@@ -132,6 +132,27 @@ Media groups, image titles, and media attached to one-line `/newchat <prompt>`
 or `/newthread <prompt>` command forms are not covered by this implementation
 slice.
 
+## Photo Output
+
+When a terminal App Server snapshot contains a successful `imageGeneration`
+item or completed dynamic-tool `inputImage` content, codex-tg uploads up to four
+PNG/JPEG payloads per turn, each up to 10 MiB, through Telegram `sendPhoto` to the same
+chat/topic. An
+explicit Markdown image in the final answer is also eligible when its resolved
+regular file remains inside that thread's working directory. A structured App
+Server `imageGeneration.savedPath` is treated separately as App Server-owned
+output and can point to the runtime's generated-artifact location.
+
+Companion images are silent because the terminal card or background notice owns
+the audible state transition. Successful image fingerprints are stored in
+SQLite, so repeated polling, restart, terminal replay, or foreground changes do
+not resend the same photo; a failed Bot API delivery remains retryable. Remote
+Markdown URLs, failed or in-progress generation items, unsupported/oversized
+payloads, and Markdown paths outside the thread working directory are not
+forwarded. Revised/internal generation prompts are never used as Telegram
+captions, and the terminal text renderer keeps only each image's human label
+rather than exposing its local filesystem path.
+
 ## Markdown Tables
 
 Telegram has no native table entity and proportional mobile fonts make raw pipe

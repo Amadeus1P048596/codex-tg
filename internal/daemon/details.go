@@ -45,7 +45,8 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 		}
 		s.markPanelEdited(panel.ID, s.currentTime())
 	}
-	if editedExistingCard && !finalNeedsSeparateMessage(snapshot.LatestFinalText) {
+	finalText := telegramFinalText(snapshot.LatestFinalText)
+	if editedExistingCard && !finalNeedsSeparateMessage(finalText) {
 		if err := s.sendForegroundTerminalNotice(ctx, sender, target, thread, snapshot); err != nil {
 			return err
 		}
@@ -69,8 +70,8 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	if err := s.store.UpdateThreadPanelFinalCard(ctx, panel.ID, panel.SummaryMessageID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP, panel.DetailsViewJSON, panel.LastFinalCardHash); err != nil {
 		return err
 	}
-	if finalNeedsSeparateMessage(snapshot.LatestFinalText) {
-		fullMessages := renderLongFinalMessages(s.visualMarker(ctx, thread.ID), snapshot.LatestFinalText)
+	if finalNeedsSeparateMessage(finalText) {
+		fullMessages := renderLongFinalMessages(s.visualMarker(ctx, thread.ID), finalText)
 		if _, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, fullMessages, nil, notifySendOptions()); err != nil {
 			return fmt.Errorf("send full Telegram final: %w", err)
 		}
@@ -106,7 +107,7 @@ func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread mod
 	buttons = append(buttons, []model.ButtonSpec{
 		s.callbackButton(ctx, "查看会话 ID", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
 	})
-	finalSummary, finalDetails := finalCardContent(snapshot.LatestFinalText)
+	finalSummary, finalDetails := finalCardContent(telegramFinalText(snapshot.LatestFinalText))
 	message := renderNotificationCard(notificationCardView{
 		Marker:     s.visualMarker(ctx, thread.ID),
 		Title:      thread.Title,

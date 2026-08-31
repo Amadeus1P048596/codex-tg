@@ -28,7 +28,7 @@ Codex App Server 运行在本机，Telegram 只承担经过权限限制的交互
 - 从手机查看本机 Codex 正在处理什么，以及任务是否需要输入。
 - 回复现有会话、启动普通任务或 Plan Mode，并停止当前任务。
 - 在多个 Codex 会话之间切换，同时避免后台任务刷屏。
-- 处理审批、结构化选择、图片输入、Details 和完整日志导出。
+- 处理审批、结构化选择、图片收发、Details 和完整日志导出。
 - 保留本地优先的数据边界：工作区、Codex 会话、SQLite 状态和配置文件都留在自己的机器上。
 
 `codex-tg` 不以替代 Codex 官方 Remote Connections 为目标。它更偏向一个可扩展的
@@ -121,6 +121,14 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
 - App Server 接受请求后，权限为私有的临时图片会保留 30 分钟，避免异步读取时文件已经被删；
   随后自动删除，启动时和后续下载前也会清理超过 24 小时的遗留文件。
 - 图片输入不会另外产生“已收到图片”卡片。
+- Codex 生成的 PNG 或 JPEG（每张最多 10 MiB、每个 turn 最多 4 张）会在 turn 结束后通过 Telegram 原生图片消息发到同一
+  chat/topic；支持 App Server `imageGeneration`、动态工具 `inputImage` 数据，以及最终答复中
+  明确引用的工作区内 Markdown 图片。
+- 图片作为最终卡片的静默伴随媒体发送，并以 thread/turn/图片指纹写入 SQLite 去重；轮询、
+  重启或前后台切换不会重复发送已经成功送达的图片，失败的发送则可以重试。
+- 最终答复里的远程图片 URL 和工作区之外的 Markdown 本地路径不会被读取或外发；结构化
+  `imageGeneration.savedPath` 由 App Server 提供，因此可作为生成文件的可信来源。内部生成
+  prompt 不会作为 Telegram 图片说明泄露，最终卡片也只保留图片名称而不展示本地路径。
 
 记录标题后，可以把纯图片或“说明文字＋图片”作为新会话的首条提示词；若仍在等待标题，
 图片不会误投当前会话，机器人会提示先发送纯文本标题。媒体组、用图片充当标题，以及给单行
