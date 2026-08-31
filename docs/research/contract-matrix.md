@@ -134,8 +134,11 @@ Adapter routing:
 - `/observe all` moves the single global observer target to the current chat/topic.
 - `/observe off` disables global background monitoring.
 - The observer target model is no longer additive `main DM + extra feeds`.
-- `/start` and `/home` open the session hub. `/inbox` is a durable per-target
-  queue of background terminal and needs-input items; switching clears an item.
+- `/start` and `/home` open the session hub. Home shows the foreground state and
+  a bounded detail list plus total count for other running sessions, using the
+  reconciled local thread/snapshot cache rather than a blocking navigation-time
+  App Server request. `/inbox` is a durable per-target queue of background
+  terminal and needs-input items; switching clears an item.
 - The observer surface is centered around a summary panel keyed by `(chat, project, thread)`.
 - The summary panel owns `Stop` and `Steer`.
 - Raw tool/output events are aggregated into the summary panel and do not create

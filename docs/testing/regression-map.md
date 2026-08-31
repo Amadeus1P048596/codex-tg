@@ -333,6 +333,8 @@ Live E2E:
   prefix, resumes it into App Server's in-memory state, and verifies that the
   real App Server archives it successfully.
 - `internal/daemon/thread_navigation_test.go::TestHomeShowsCurrentSessionAndPersistentInboxCount`
+- `internal/daemon/thread_navigation_test.go::TestHomeShowsEveryConcurrentRunningSessionStatus`
+- `internal/daemon/thread_navigation_test.go::TestHomeBoundsConcurrentRunningSessionDetails`
 - `internal/daemon/thread_navigation_test.go::TestStartOpensTheSessionHome`
 - `internal/daemon/thread_navigation_test.go::TestHomeNewSessionChooserArmsTwoStepPromptInPlace`
 - `internal/daemon/thread_navigation_test.go::TestInboxPersistsBackgroundAttentionAndSwitchClearsIt`
@@ -400,8 +402,11 @@ Contract notes:
   Active and input-waiting sessions cannot be archived. `/unarchive` uses App
   Server's archived filter, ten-row cursor pages, title buttons, and in-place
   restore results with switch/continue actions.
-- `/start` and `/home` render the session hub. `/inbox` persists background
-  terminal/input attention, and switching clears the selected item.
+- `/start` and `/home` render the session hub. Home excludes the foreground from
+  its background-running count, rejects stale terminal snapshots, expands at
+  most five running rows with direct view actions, and summarizes any remainder.
+  `/inbox` persists background terminal/input attention, and switching clears
+  the selected item.
 - Primary status and button copy is Chinese while command names and internal
   protocol state remain stable.
 

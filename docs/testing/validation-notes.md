@@ -1,5 +1,17 @@
 # Validation Notes
 
+- 2026-08-31 CST concurrent Home visibility validation reproduced that `/home`
+  rendered only the foreground thread and durable attention count even while
+  other reconciled sessions were running. Home now shows a bounded five-row
+  detail list plus the total count for background-running sessions, including
+  title, Chinese state, elapsed time, and a direct view action; terminal
+  snapshots are excluded even if their thread row is stale-active. Targeted
+  navigation tests, full `go test ./...`, `go vet ./...`, `go build
+  -buildvcs=false ./...`, `git diff --check`, and the public private-data scan
+  passed. The Windows candidate is staged behind three consecutive idle checks;
+  live `/home` readback remains pending until the active run completes and the
+  rollback-capable cutover can proceed.
+
 - 2026-08-31 CST Scheduled tasks bridge validation added a private stdio MCP
   server and injected it into both new and resumed Telegram App Server threads
   when `CTR_GO_AUTOMATIONS_DIR` is configured. Store/MCP/config regression tests,

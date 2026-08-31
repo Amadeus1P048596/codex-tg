@@ -7,10 +7,14 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mideco-tech/codex-tg/internal/appserver"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
-const sessionInboxStatePrefix = "ui.inbox."
+const (
+	sessionInboxStatePrefix = "ui.inbox."
+	homeRunningSessionLimit = 5
+)
 
 type sessionInboxItem struct {
 	ThreadID    string            `json:"thread_id"`
@@ -19,6 +23,12 @@ type sessionInboxItem struct {
 	State       notificationState `json:"state"`
 	UpdatedAt   int64             `json:"updated_at"`
 	Fingerprint string            `json:"fingerprint,omitempty"`
+}
+
+type homeRunningSession struct {
+	Thread   model.Thread
+	TurnID   string
+	Duration string
 }
 
 func sessionInboxTargetPrefix(chatID, topicID int64) string {
@@ -120,15 +130,19 @@ func (s *Service) homeOverview(ctx context.Context, chatID, topicID int64) (*Dir
 	if err != nil {
 		return nil, err
 	}
+	running, runningTotal, err := s.backgroundRunningSessions(ctx, currentThreadID(thread), homeRunningSessionLimit)
+	if err != nil {
+		return nil, err
+	}
 	items, err := s.inboxItems(ctx, chatID, topicID)
 	if err != nil {
 		return nil, err
 	}
 
 	lines := []string{"Codex 首页"}
-	buttons := make([][]model.ButtonSpec, 0, 3)
+	buttons := make([][]model.ButtonSpec, 0, 3+len(running))
 	if thread == nil {
-		lines = append(lines, "", "当前没有活动会话。")
+		lines = append(lines, "", "当前没有前台会话。")
 		buttons = append(buttons, []model.ButtonSpec{
 			s.callbackButton(ctx, "切换会话", "home_threads", "", "", "", nil),
 			s.callbackButton(ctx, "新建会话", "home_new_menu", "", "", "", nil),
@@ -151,6 +165,25 @@ func (s *Service) homeOverview(ctx context.Context, chatID, topicID int64) (*Dir
 			s.callbackButton(ctx, "查看当前进度", "home_show_current", thread.ID, "", "", nil),
 			s.callbackButton(ctx, "切换会话", "home_threads", "", "", "", nil),
 		})
+	}
+	if runningTotal > 0 {
+		lines = append(lines, "", fmt.Sprintf("后台运行 · %d", runningTotal))
+		for _, session := range running {
+			statusLine := "处理中"
+			if session.Duration != "" {
+				statusLine += " · " + session.Duration
+			}
+			title := threadSelectionTitle(session.Thread)
+			lines = append(lines, s.visualMarker(ctx, session.Thread.ID)+" "+title, statusLine)
+			buttons = append(buttons, []model.ButtonSpec{
+				s.callbackButton(ctx, shortButtonLabel(s.visualMarker(ctx, session.Thread.ID)+" "+title+" · 处理中"), "show_thread", session.Thread.ID, session.TurnID, "", nil),
+			})
+		}
+		if hidden := runningTotal - len(running); hidden > 0 {
+			lines = append(lines, fmt.Sprintf("还有 %d 个运行中会话，可在“切换会话”中查看。", hidden))
+		}
+	}
+	if thread != nil {
 		buttons = append(buttons, []model.ButtonSpec{
 			s.callbackButton(ctx, "新建会话", "home_new_menu", "", "", "", nil),
 		})
@@ -164,6 +197,41 @@ func (s *Service) homeOverview(ctx context.Context, chatID, topicID int64) (*Dir
 		lines = append(lines, "", "没有后台会话需要处理")
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons, ThreadID: currentThreadID(thread)}, nil
+}
+
+func (s *Service) backgroundRunningSessions(ctx context.Context, foregroundThreadID string, limit int) ([]homeRunningSession, int, error) {
+	threads, err := s.store.ListThreads(ctx, 500, "")
+	if err != nil {
+		return nil, 0, err
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	sessions := make([]homeRunningSession, 0, min(limit, len(threads)))
+	total := 0
+	for _, thread := range threads {
+		if thread.Archived || thread.ID == foregroundThreadID || !threadLooksActiveForPolling(thread) {
+			continue
+		}
+		var snapshot *appserver.ThreadReadSnapshot
+		if _, loaded, snapshotErr := s.loadThreadPanelSnapshot(ctx, thread.ID); snapshotErr == nil {
+			snapshot = loaded
+		}
+		if currentThreadStatusLabel(thread, snapshot) != "处理中" {
+			continue
+		}
+		total++
+		if len(sessions) >= limit {
+			continue
+		}
+		session := homeRunningSession{Thread: thread}
+		if snapshot != nil {
+			session.TurnID = snapshot.LatestTurnID
+			session.Duration = runTimingValue(snapshot, s.currentTime())
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, total, nil
 }
 
 func currentThreadID(thread *model.Thread) string {

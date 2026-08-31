@@ -55,18 +55,25 @@ notification policy. Tool event bursts never create individual notifications.
 ## Session Home, Inbox, And Thread Picker
 
 `/start` and `/home` open the same compact session home. It shows the foreground
-session title, current state and elapsed time, plus a durable count of background
-sessions needing attention. Its buttons open the current card, the runtime
-session picker, a Chat/ordinary-session creation chooser, or `/inbox` in place.
+session title, current state, and elapsed time. A separate `后台运行` section
+lists the title, `处理中` state, and elapsed time of every other running session;
+the five most recent are expanded as direct view buttons and any remainder is
+counted. The section uses already reconciled SQLite thread/snapshot state so Home
+stays responsive and does not contend with active writers. Home also shows the
+durable count of background sessions needing attention. Its other buttons open
+the current card, runtime session picker, Chat/ordinary-session creation chooser,
+or `/inbox` in place.
 
 `/inbox` is SQLite-backed and survives daemon restarts. It retains one current
 Completed, Failed, Cancelled, or Needs-input item per background session. Items
 are title buttons; switching to one clears it from the inbox.
 
 Each Telegram chat/topic has one foreground Codex session. Its Working card is
-the only live progress card shown. Progress from other sessions is completely
-suppressed; when a background session completes, fails, is cancelled, or needs
-input, Telegram sends one compact notice with a `切换至该会话` button.
+the only live progress card shown. Progress-card edits from other sessions are
+suppressed, while their compact running states remain visible on demand through
+Home. This keeps passive navigation observable without letting several cards
+refresh continuously. When a background session completes, fails, is cancelled,
+or needs input, Telegram sends one compact notice with a `切换至该会话` button.
 
 Switching removes the previous foreground Working card, makes the selected
 session the foreground and bound session, and shows its current card. This keeps

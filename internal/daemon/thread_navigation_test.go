@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,100 @@ func TestHomeShowsCurrentSessionAndPersistentInboxCount(t *testing.T) {
 		if !strings.Contains(buttonTexts(response.Buttons), label) {
 			t.Fatalf("home buttons = %#v, missing %q", response.Buttons, label)
 		}
+	}
+}
+
+func TestHomeShowsEveryConcurrentRunningSessionStatus(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	chatID := int64(123456789)
+
+	foreground := model.Thread{ID: "home-running-foreground", Title: "当前排查", Status: "active", UpdatedAt: now.Unix()}
+	storeForegroundTestSnapshot(t, service, foreground, appserver.ThreadReadSnapshot{
+		Thread: foreground, LatestTurnID: "foreground-turn", LatestTurnStatus: "inProgress",
+		LatestTurnStartedAt: now.Add(-72 * time.Second).Format(time.RFC3339Nano),
+	}, now)
+	if err := service.store.SetState(ctx, foregroundThreadStateKey(chatID, 0), foreground.ID); err != nil {
+		t.Fatalf("SetState foreground failed: %v", err)
+	}
+
+	backgroundOne := model.Thread{ID: "home-running-one", Title: "编译发布包", Status: "active", UpdatedAt: now.Add(-time.Second).Unix()}
+	storeForegroundTestSnapshot(t, service, backgroundOne, appserver.ThreadReadSnapshot{
+		Thread: backgroundOne, LatestTurnID: "background-one-turn", LatestTurnStatus: "inProgress",
+		LatestTurnStartedAt: now.Add(-35 * time.Second).Format(time.RFC3339Nano),
+	}, now)
+	backgroundTwo := model.Thread{ID: "home-running-two", Title: "检查同步状态", Status: "running", UpdatedAt: now.Add(-2 * time.Second).Unix()}
+	storeForegroundTestSnapshot(t, service, backgroundTwo, appserver.ThreadReadSnapshot{
+		Thread: backgroundTwo, LatestTurnID: "background-two-turn", LatestTurnStatus: "inProgress",
+		LatestTurnStartedAt: now.Add(-125 * time.Second).Format(time.RFC3339Nano),
+	}, now)
+	staleActive := model.Thread{ID: "home-stale-active", Title: "已经结束的旧任务", Status: "active", UpdatedAt: now.Add(-3 * time.Second).Unix()}
+	storeForegroundTestSnapshot(t, service, staleActive, appserver.ThreadReadSnapshot{
+		Thread: staleActive, LatestTurnID: "stale-turn", LatestTurnStatus: "completed",
+		LatestTurnStartedAt: now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+		LatestTurnUpdatedAt: now.Add(-time.Minute).Format(time.RFC3339Nano),
+	}, now)
+
+	response, err := service.handleCommand(ctx, chatID, 0, "/home", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/home) failed: %v", err)
+	}
+	for _, want := range []string{"后台运行 · 2", "编译发布包", "处理中 · 35s", "检查同步状态", "处理中 · 2m 05s"} {
+		if response == nil || !strings.Contains(response.Text, want) {
+			t.Fatalf("home response = %#v, missing %q", response, want)
+		}
+	}
+	if strings.Contains(response.Text, staleActive.Title) {
+		t.Fatalf("home response = %q, should not list a terminal snapshot as running", response.Text)
+	}
+	for _, background := range []model.Thread{backgroundOne, backgroundTwo} {
+		token := callbackTokenForButton(response.Buttons, background.Title)
+		if token == "" {
+			t.Fatalf("home buttons = %#v, missing running session %q", response.Buttons, background.Title)
+		}
+		route, routeErr := service.store.GetCallbackRoute(ctx, token)
+		if routeErr != nil || route == nil || route.Action != "show_thread" || route.ThreadID != background.ID {
+			t.Fatalf("route for %q = %#v err=%v, want show_thread", background.Title, route, routeErr)
+		}
+	}
+}
+
+func TestHomeBoundsConcurrentRunningSessionDetails(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	for index := 1; index <= homeRunningSessionLimit+1; index++ {
+		thread := model.Thread{
+			ID:        fmt.Sprintf("home-running-limit-%d", index),
+			Title:     fmt.Sprintf("后台任务 %d", index),
+			Status:    "active",
+			UpdatedAt: now.Add(-time.Duration(index) * time.Second).Unix(),
+		}
+		storeForegroundTestSnapshot(t, service, thread, appserver.ThreadReadSnapshot{
+			Thread: thread, LatestTurnID: fmt.Sprintf("limit-turn-%d", index), LatestTurnStatus: "inProgress",
+			LatestTurnStartedAt: now.Add(-time.Duration(index) * time.Minute).Format(time.RFC3339Nano),
+		}, now)
+	}
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/home", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/home) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "后台运行 · 6") || !strings.Contains(response.Text, "还有 1 个运行中会话") {
+		t.Fatalf("home response = %#v, want bounded running-session summary", response)
+	}
+	if got := countButtonsContaining(response.Buttons, "处理中"); got != homeRunningSessionLimit {
+		t.Fatalf("running-session buttons = %d, want %d", got, homeRunningSessionLimit)
+	}
+	if strings.Contains(response.Text, "后台任务 6\n") {
+		t.Fatalf("home response = %q, sixth running session should be summarized rather than expanded", response.Text)
 	}
 }
 
