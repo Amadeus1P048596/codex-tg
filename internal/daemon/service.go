@@ -85,6 +85,7 @@ type Service struct {
 	wg                       sync.WaitGroup
 	panelMu                  sync.Mutex
 	automationMu             sync.Mutex
+	pushMu                   sync.Mutex
 	sender                   Sender
 	logger                   *log.Logger
 	diagnosticMu             sync.Mutex
@@ -124,6 +125,9 @@ var (
 func New(cfg config.Config) (*Service, error) {
 	if config.IsDesktopAutomationsDir(cfg.AutomationsDir) {
 		return nil, errors.New("Telegram Scheduled tasks must not share the conventional Codex Desktop automation store; use a private directory such as ~/.codex-tg/automations")
+	}
+	if err := validatePushConfig(cfg.PushListen, cfg.PushToken); err != nil {
+		return nil, err
 	}
 	if err := cfg.Paths.Ensure(); err != nil {
 		return nil, err
@@ -217,6 +221,21 @@ func (s *Service) Start(ctx context.Context) error {
 	s.liveConnected = false
 	s.pollConnected = false
 	s.mu.Unlock()
+	if err := s.startPushHTTP(runCtx); err != nil {
+		cancel()
+		message := sanitizeDiagnosticString(err.Error())
+		s.mu.Lock()
+		s.started = false
+		s.cancel = nil
+		s.ready = false
+		s.phase = "failed"
+		s.lastError = message
+		s.mu.Unlock()
+		_ = s.store.SetState(ctx, "daemon.phase", "failed")
+		_ = s.store.SetState(ctx, "daemon.ready", "false")
+		_ = s.store.SetState(ctx, "daemon.last_error", message)
+		return err
+	}
 
 	_ = s.store.SetState(runCtx, "daemon.phase", "ready")
 	_ = s.store.SetState(runCtx, "daemon.ready", "true")
@@ -779,9 +798,16 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 	if threadID != "" {
 		previous, _ := s.store.GetSnapshot(ctx, threadID)
 		interactiveSync := s.threadNeedsLiveSync(ctx, threadID)
-		if _, err := s.refreshThread(ctx, live, threadID); err != nil {
+		refreshed, err := s.refreshThread(ctx, live, threadID)
+		if err != nil {
+			if storedThread, getErr := s.store.GetThread(ctx, threadID); getErr == nil && storedThread != nil {
+				s.captureAutomationOriginFromEvent(ctx, event, *storedThread)
+			}
 			s.noteSessionError(ctx, "live_refresh", err)
 			return
+		}
+		if refreshed != nil {
+			s.captureAutomationOriginFromEvent(ctx, event, *refreshed)
 		}
 		if hasLiveToolSnapshot {
 			_ = s.applyLiveToolSnapshot(ctx, threadID, liveToolSnapshot)
@@ -2787,6 +2813,9 @@ func (s *Service) runtimeThreads(ctx context.Context, limit int, search string) 
 	query := strings.ToLower(strings.TrimSpace(search))
 	filtered := make([]model.Thread, 0, min(limit, len(threads)))
 	for _, thread := range threads {
+		if s.isAutomationExecutionThread(ctx, thread.ID) {
+			continue
+		}
 		if query != "" {
 			haystack := strings.ToLower(strings.Join([]string{thread.Title, thread.ProjectName, thread.LastPreview, thread.ID}, "\n"))
 			if !strings.Contains(haystack, query) {

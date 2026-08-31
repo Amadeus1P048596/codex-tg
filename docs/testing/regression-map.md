@@ -94,6 +94,7 @@ Primary tests:
 - `internal/automation/store_test.go::TestStoreRequiresNativeCronRuntimeFields`
 - `internal/automation/store_test.go::TestStoreHidesAndProtectsDesktopHeartbeatTasks`
 - `internal/automation/store_test.go::TestStoreMarksTasksAsTelegramOwnedAndPersistsCWD`
+- `internal/automation/store_test.go::TestStoreSetsOriginWithoutChangingScheduleBoundary`
 - `internal/automation/scheduler_test.go::TestLatestDueUsesLocalWallClockAndTaskUpdateBoundary`
 - `internal/automation/scheduler_test.go::TestLatestDueSupportsHourlyAndWeeklyIntervals`
 - `internal/automation/mcp_test.go::TestServeMCPListsAndCallsAutomationTool`
@@ -103,6 +104,14 @@ Primary tests:
 - `internal/appserver/client_test.go::TestAutomationMCPConfigIsDisabledWithoutDirectory`
 - `internal/config/config_test.go::TestLoadReadsConfigFileAndEnvOverridesIt`
 - `internal/config/config_test.go::TestFromEnvDefaultsAutomationsInsideTelegramHome`
+- `internal/daemon/push_service_test.go::TestCompletedAutomationMCPEventAttachesSourceConversation`
+- `internal/daemon/push_service_test.go::TestScheduledTerminalUsesPushServiceWithoutConversationPanel`
+- `internal/daemon/push_service_test.go::TestScheduledFailedRunsOnlySuppressesSuccessfulPush`
+- `internal/daemon/push_service_test.go::TestScheduledExecutionThreadIsTrackedButHiddenFromConversationSurfaces`
+- `internal/daemon/push_service_test.go::TestPushHTTPHandlerRequiresBearerAndDeduplicates`
+- `internal/daemon/push_service_test.go::TestPushHTTPHandlerRejectsOversizedBody`
+- `internal/daemon/push_service_test.go::TestNewRejectsUnsafePushListenerConfiguration`
+- `internal/daemon/push_service_test.go::TestStartFailsClosedWhenPushAddressIsAlreadyInUse`
 - `internal/config/config_test.go::TestIsDesktopAutomationsDirRejectsConventionalSharedStore`
 - `internal/daemon/service_test.go::TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce`
 - `internal/daemon/service_test.go::TestNewRejectsConventionalDesktopAutomationStore`
@@ -121,6 +130,8 @@ Contract notes:
 - Only standalone `cron` tasks are accepted. Heartbeat continuation is invalid.
 - The daemon owns due-slot calculation and an at-most-once SQLite claim; App
   Server owns the new thread and turn after dispatch.
+- Scheduler execution threads stay pollable internally but are filtered from
+  `/home`, `/threads`, `/inbox`, projects, and ordinary conversation cards.
 - Live operator QA must confirm a real due occurrence starts in the TG runtime
   and produces Telegram readback without appearing in the Desktop task store.
 

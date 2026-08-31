@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const toolDescription = "Manage Scheduled tasks owned and executed by codex-tg. Use this for recurring tasks, reminders, monitoring, or scheduled follow-ups requested from Telegram. Telegram and Codex Desktop use isolated task stores and sessions, so this integration creates standalone cron tasks only; heartbeat tasks cannot target Telegram threads. Each due run starts a new background thread in the Telegram-private Codex runtime and sends its lifecycle/result through the Telegram observer. Prefer updating an existing task over creating a duplicate. Times are local wall-clock times. Never put credentials or secrets in an automation prompt."
+const toolDescription = "Manage Scheduled tasks owned and executed by codex-tg. Use this for recurring tasks, reminders, monitoring, or scheduled follow-ups requested from Telegram. Telegram and Codex Desktop use isolated task stores and sessions, so this integration creates standalone cron tasks only; heartbeat tasks cannot target Telegram threads. Each due run uses a hidden background thread in the Telegram-private Codex runtime, then sends one standalone result through the codex-tg push service with the owning conversation title. Prefer updating an existing task over creating a duplicate. Times are local wall-clock times. Never put credentials or secrets in an automation prompt."
 
 func ServeMCP(in io.Reader, out io.Writer, store *Store) error {
 	scanner := bufio.NewScanner(in)

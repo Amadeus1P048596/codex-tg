@@ -182,7 +182,7 @@ func TestPendingNewChatConsumesCaptionAndLocalImageAsFirstPrompt(t *testing.T) {
 	if _, err := service.handleCommand(ctx, 123456789, 0, "/newchat", 0); err != nil {
 		t.Fatalf("handleCommand(/newchat) failed: %v", err)
 	}
-	if _, err := service.handlePlainText(ctx, 123456789, 0, "健康管理", 0); err != nil {
+	if _, err := service.handlePlainText(ctx, 123456789, 0, "示例计划", 0); err != nil {
 		t.Fatalf("handlePlainText(title) failed: %v", err)
 	}
 	response, err := service.HandleMessageWithLocalImages(
@@ -246,7 +246,7 @@ func TestPendingNewChatPhotoWhileWaitingForTitleDoesNotRouteToBinding(t *testing
 		123456789,
 		0,
 		123456789,
-		"健康管理",
+		"示例计划",
 		[]string{`C:\runtime\heart-rate.jpg`},
 		0,
 	)

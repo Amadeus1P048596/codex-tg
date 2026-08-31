@@ -29,6 +29,8 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	t.Setenv("CTR_GO_FULL_ACCESS", "true")
 	t.Setenv("CTR_GO_DIAGNOSTIC_LOGS", "no")
 	t.Setenv("CTR_GO_NOTIFY_NEW_RUN", "off")
+	t.Setenv("CTR_GO_PUSH_LISTEN", "127.0.0.1:8787")
+	t.Setenv("CTR_GO_PUSH_TOKEN", "private-push-token")
 	t.Setenv("CTR_GO_OBSERVER_POLL_SECONDS", "7")
 	t.Setenv("CTR_GO_REQUEST_TIMEOUT_SECONDS", "31")
 	t.Setenv("CTR_GO_INDEX_REFRESH_SECONDS", "46")
@@ -73,6 +75,12 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	}
 	if cfg.NotifyNewRun {
 		t.Fatal("NotifyNewRun = true, want false")
+	}
+	if got, want := cfg.PushListen, "127.0.0.1:8787"; got != want {
+		t.Fatalf("PushListen = %q, want %q", got, want)
+	}
+	if got, want := cfg.PushToken, "private-push-token"; got != want {
+		t.Fatalf("PushToken = %q, want configured value", got)
 	}
 	if got, want := cfg.ObserverPollInterval, 7*time.Second; got != want {
 		t.Fatalf("ObserverPollInterval = %v, want %v", got, want)

@@ -60,6 +60,8 @@ type Config struct {
 	LogEnabled                  bool
 	DiagnosticLogs              bool
 	NotifyNewRun                bool
+	PushListen                  string
+	PushToken                   string
 	ObserverPollInterval        time.Duration
 	RequestTimeout              time.Duration
 	IndexRefreshInterval        time.Duration
@@ -147,6 +149,8 @@ func fromSource(source envSource) Config {
 		LogEnabled:                  source.bool("CTR_GO_LOG_ENABLED", true),
 		DiagnosticLogs:              source.bool("CTR_GO_DIAGNOSTIC_LOGS", true),
 		NotifyNewRun:                source.bool("CTR_GO_NOTIFY_NEW_RUN", true),
+		PushListen:                  source.string("CTR_GO_PUSH_LISTEN", ""),
+		PushToken:                   source.string("CTR_GO_PUSH_TOKEN", ""),
 		ObserverPollInterval:        source.durationSeconds("CTR_GO_OBSERVER_POLL_SECONDS", 5*time.Second),
 		RequestTimeout:              source.durationSeconds("CTR_GO_REQUEST_TIMEOUT_SECONDS", 30*time.Second),
 		IndexRefreshInterval:        source.durationSeconds("CTR_GO_INDEX_REFRESH_SECONDS", 45*time.Second),
@@ -177,6 +181,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		LogEnabled                  bool    `json:"log_enabled"`
 		DiagnosticLogs              bool    `json:"diagnostic_logs"`
 		NotifyNewRun                bool    `json:"notify_new_run"`
+		PushEnabled                 bool    `json:"push_enabled"`
 		ObserverPollSeconds         float64 `json:"observer_poll_seconds"`
 		RequestTimeoutSeconds       float64 `json:"request_timeout_seconds"`
 		ProjectsProjectPreviewLimit int     `json:"projects_project_preview_limit"`
@@ -201,6 +206,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		LogEnabled:                  c.LogEnabled,
 		DiagnosticLogs:              c.DiagnosticLogs,
 		NotifyNewRun:                c.NotifyNewRun,
+		PushEnabled:                 strings.TrimSpace(c.PushListen) != "",
 		ObserverPollSeconds:         c.ObserverPollInterval.Seconds(),
 		RequestTimeoutSeconds:       c.RequestTimeout.Seconds(),
 		ProjectsProjectPreviewLimit: positiveOrDefault(c.ProjectsProjectPreviewLimit, 7),

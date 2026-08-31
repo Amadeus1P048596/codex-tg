@@ -87,6 +87,10 @@ func (s *Service) inboxItems(ctx context.Context, chatID, topicID int64) ([]sess
 		if err := json.Unmarshal([]byte(raw), &item); err != nil || strings.TrimSpace(item.ThreadID) == "" {
 			continue
 		}
+		if s.isAutomationExecutionThread(ctx, item.ThreadID) {
+			_ = s.clearInboxItem(ctx, chatID, topicID, item.ThreadID)
+			continue
+		}
 		if thread, getErr := s.store.GetThread(ctx, item.ThreadID); getErr == nil && thread != nil {
 			if thread.Archived {
 				_ = s.clearInboxItem(ctx, chatID, topicID, item.ThreadID)
@@ -210,7 +214,7 @@ func (s *Service) backgroundRunningSessions(ctx context.Context, foregroundThrea
 	sessions := make([]homeRunningSession, 0, min(limit, len(threads)))
 	total := 0
 	for _, thread := range threads {
-		if thread.Archived || thread.ID == foregroundThreadID || !threadLooksActiveForPolling(thread) {
+		if thread.Archived || thread.ID == foregroundThreadID || s.isAutomationExecutionThread(ctx, thread.ID) || !threadLooksActiveForPolling(thread) {
 			continue
 		}
 		var snapshot *appserver.ThreadReadSnapshot

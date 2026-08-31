@@ -90,6 +90,9 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 	if err != nil || thread == nil || snapshot == nil {
 		return
 	}
+	if s.syncAutomationPush(ctx, *thread, snapshot) {
+		return
+	}
 	s.updateAutomationRunFromSnapshot(ctx, *thread, snapshot)
 	pending, _ := s.store.GetLatestPendingApprovalForThread(ctx, threadID)
 	pending = pendingForSnapshot(pending, snapshot)

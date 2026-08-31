@@ -67,6 +67,9 @@ func (s *Service) projectCatalog(ctx context.Context) (projectCatalog, error) {
 	grouped := map[string]*projectWorkspace{}
 	chats := []model.Thread{}
 	for _, thread := range threads {
+		if s.isAutomationExecutionThread(ctx, thread.ID) {
+			continue
+		}
 		if s.isCodexChatThread(thread) {
 			chats = append(chats, thread)
 			continue
@@ -504,6 +507,9 @@ func (s *Service) projectThreads(ctx context.Context, payload map[string]any) (*
 	lines := []string{fmt.Sprintf("Threads for %s", workspace.ProjectName)}
 	buttons := [][]model.ButtonSpec{}
 	for _, thread := range threads {
+		if s.isAutomationExecutionThread(ctx, thread.ID) {
+			continue
+		}
 		if model.NormalizePath(thread.CWD) != model.NormalizePath(workspace.CWD) {
 			continue
 		}

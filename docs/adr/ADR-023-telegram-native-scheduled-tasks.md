@@ -4,6 +4,7 @@
 - Supersedes: ADR-022
 - Amends: ADR-019
 - Related: `docs/process/telegram-scheduled-tasks-brief.md`
+- Related: `docs/process/codex-tg-push-service-brief.md`
 
 ## Context
 
@@ -37,9 +38,20 @@ rule that Desktop and Telegram own separate mutable runtime state.
 - Each claimed occurrence starts a new thread and turn in the Telegram-private
   App Server using the task prompt, model, reasoning effort, and optional cwd.
   It never resumes a prior thread.
-- Scheduled threads stay out of the current chat binding. Existing observer,
-  Home, inbox, approval/input, and terminal-notification paths own their
-  Telegram visibility.
+- Scheduled threads stay out of the current chat binding and the normal
+  observer, Home, inbox, and activity-card surfaces. They are private execution
+  contexts rather than user conversations.
+- A successful `automation_update` completion records the creating Telegram
+  thread id and user-facing title on the task without changing its scheduling
+  `updated_at` boundary.
+- Terminal or input-required scheduled states publish one standalone message
+  through the daemon's unified push service. That message includes the task
+  name and owning conversation title; `failed_runs_only` still suppresses a
+  successful result.
+- External private-network producers may use an optional authenticated
+  `POST /v1/push` adapter. It is disabled by default, accepts no Telegram
+  credentials or destination ids, and routes through the configured observer
+  target with durable idempotency keys.
 - `heartbeat` remains unsupported because scheduled continuation would carry
   mutable conversation state and writer ownership across occurrences.
 
@@ -54,6 +66,10 @@ rule that Desktop and Telegram own separate mutable runtime state.
   it does not backfill the slot that preceded the edit.
 - The daemon owns lightweight scheduling state, while App Server remains the
   authority for each scheduled thread and turn once execution begins.
+- Scheduled execution remains isolated while notification routing, formatting,
+  authentication, and de-duplication are shared with non-Codex producers such
+  as the bank-gold monitor. External producers no longer need the Telegram Bot
+  Token or chat id.
 - Existing installations that explicitly pointed at Desktop's task directory
   must move Telegram-owned cron definitions into the private directory and
   update the config before deploying this version.
@@ -62,7 +78,7 @@ rule that Desktop and Telegram own separate mutable runtime state.
 
 - Importing or executing Desktop-owned heartbeat tasks.
 - Mirroring Desktop Scheduled history.
-- Public scheduling or App Server network listeners.
+- Public scheduling, a public push endpoint, or an App Server network listener.
 - A general distributed scheduler or exactly-once side-effect guarantee inside
   a model turn; the guarantee covers only starting the same local time slot more
   than once.

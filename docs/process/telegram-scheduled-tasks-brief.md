@@ -25,16 +25,19 @@ mutable state with Codex Desktop.
 The operator asks Codex in Telegram for a recurring task. The injected MCP tool
 writes a validated cron definition under `~/.codex-tg/automations` by default.
 The daemon claims each due local-time slot in SQLite, starts a new background
-thread/turn in the TG-private App Server, and sends lifecycle/result visibility
-through the normal observer, `/home`, and `/inbox` behavior.
+thread/turn in the TG-private App Server, and keeps that execution thread out of
+normal observer cards, `/home`, and `/inbox`. When the run completes, fails, is
+cancelled, or needs input, the unified push service sends one standalone result
+that names the task's owning Telegram conversation.
 
 ## Architecture
 
 `internal/automation` owns the safe definition store and RRULE calculation.
 `internal/appserver` injects the task-management MCP server into new and resumed
 Telegram threads. `internal/daemon` owns polling, durable slot claims, new
-thread/turn dispatch, and failure notification. App Server remains authoritative
-for the scheduled thread after dispatch.
+thread/turn dispatch, App Server completion-event origin capture, and unified
+push delivery. App Server remains authoritative for the scheduled thread after
+dispatch.
 
 ## Testing
 
@@ -44,6 +47,9 @@ for the scheduled thread after dispatch.
   weekly intervals.
 - Daemon regression proves one due slot starts exactly one unbound background
   thread with the task prompt/model/reasoning settings.
+- Push regressions prove completed MCP events attach task origin without moving
+  the schedule boundary, and scheduled terminal snapshots create exactly one
+  push but no normal conversation panel.
 - MCP handshake, tool discovery, config injection, full Go tests/build, and a
   targeted private-data scan remain required.
 - Live Telegram completion readback is required after an operator-approved
@@ -57,5 +63,8 @@ for the scheduled thread after dispatch.
 - [x] Due occurrences are durably claimed and dispatched once.
 - [x] Scheduled runs use new TG-private App Server threads and never change the
   current Telegram binding.
+- [x] New task definitions retain their owning source thread and title.
+- [x] Scheduled terminal results use the unified push path and do not create
+  normal observer, Home, or inbox entries.
 - [ ] A real due task completes and produces Telegram readback after the pending
   operator-approved deployment.

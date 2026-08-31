@@ -139,7 +139,8 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
 可以直接在 Telegram 会话里用自然语言要求 Codex 创建、查看、修改或删除 Scheduled tasks。
 codex-tg 会在新建和恢复会话时注入本地 `automation_update` 工具，把任务写入 TG 私有目录；
 daemon 每 15 秒检查一次到期任务，并在 TG 私有 App Server 中为每次运行创建一个独立后台会话。
-任务的运行、需要输入、失败和最终结果沿用现有 observer 与 `/home`、`/inbox` 链路回到 Telegram。
+这个后台会话只承担隔离执行，不会显示成新的普通聊天卡片，也不会进入 `/home` 或 `/inbox`；需要
+输入、失败或完成时，daemon 通过统一推送服务发送一条独立通知，并注明任务归属的原会话名称。
 
 - Telegram 只能创建独立运行的 `cron` 任务。绑定既有会话续跑的 `heartbeat` 不受支持；每次运行
   都是新的 thread，避免把旧对话状态、writer 所有权或失败上下文带进下一次计划执行。
@@ -148,10 +149,23 @@ daemon 每 15 秒检查一次到期任务，并在 TG 私有 App Server 中为�
 - 每个任务可保存独立的 model、reasoning effort 和可选 `cwd`；未设置 `cwd` 时使用 daemon 默认目录。
 - 到期时先在 SQLite 中持久领取该时间槽；daemon 重启后不会重复启动同一时间槽。任务在 App Server
   暂未就绪时保持等待，连接恢复后再执行。
+- 创建或首次更新任务时，daemon 从 App Server 完成事件中记录任务来源 thread 与当时的会话标题；
+  这项元数据更新不会改变任务的 `updated_at`，因此不会推迟下一个计划时间槽。
 - 任务提示词以明文保存在本机任务目录，不应包含 token、密码或其他秘密。
 
 默认目录是 `~/.codex-tg/automations`，可用 `CTR_GO_AUTOMATIONS_DIR` 改到另一个 TG 专用目录。
 不要把它指向 `~/.codex/automations` 或任何 Desktop runtime 目录。
+
+### 通用推送服务
+
+codex-tg 内部的定时结果和外部告警共用同一套目标路由、消息格式和幂等去重。外部生产者可在
+明确启用后调用 `POST /v1/push`，只提交 `source`、`title`、`body`、可选的
+`conversation_title`、`severity` 和 `idempotency_key`。接口不接受 Bot Token、Chat ID、
+parse mode、按钮或文件路径，因此 Telegram 凭据和最终目的地始终只由 codex-tg 管理。
+
+监听器默认关闭；需要让 NAS 等私网设备推送时，同时设置 `CTR_GO_PUSH_LISTEN` 和至少 32 字符的
+`CTR_GO_PUSH_TOKEN`。建议只绑定主机的明确局域网或 Tailscale 地址，并由客户端把完整
+`http://<private-host>:<port>/v1/push` 地址与专用 Token 保存在自己的私密配置中。
 
 ## 工作方式
 
@@ -316,6 +330,8 @@ ctr-go version
 | `CTR_GO_HOME` | 自定义 daemon 数据、日志和 SQLite 根目录 |
 | `CTR_GO_PANEL_MODE` | `per_run`（默认）或 `stable` |
 | `CTR_GO_NOTIFY_NEW_RUN` | 是否为新 run 使用普通通知 |
+| `CTR_GO_PUSH_LISTEN` | 可选的统一推送 HTTP 监听地址；默认关闭，必须绑定明确的私网或回环地址 |
+| `CTR_GO_PUSH_TOKEN` | 启用统一推送 HTTP 接口时必填的独立 Bearer Token；至少 32 个字符且不得提交到 Git |
 | `CTR_GO_LOG_ENABLED` | 是否保存 daemon 标准日志 |
 | `CTR_GO_DIAGNOSTIC_LOGS` | 是否输出结构化诊断事件 |
 | `CTR_GO_OBSERVER_POLL_SECONDS` | observer 轮询间隔，默认 5 秒 |
@@ -404,6 +420,8 @@ Telegram 实际交互还需要真实 Bot API 回读验证。公开安全的 live
 ## 安全注意事项
 
 - 不要把 Codex App Server 监听地址暴露到公网。
+- 不要把统一推送接口暴露到公网；仅绑定明确的回环、局域网或私有组网地址，并为每个外部生产者
+  使用独立于 Telegram Bot Token 的高熵 `CTR_GO_PUSH_TOKEN`。
 - 必须配置 `CTR_GO_ALLOWED_USER_IDS`，必要时同时限制 `CTR_GO_ALLOWED_CHAT_IDS`。
 - 不要提交 bot token、`.env`、Telegram session、SQLite 数据库、日志、私密截图或本地会话文件。
 - Telegram long polling 出现 `409 Conflict` 通常表示另一个进程正在消费同一个 bot token。

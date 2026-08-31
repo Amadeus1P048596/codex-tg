@@ -66,6 +66,25 @@ func TestMarshalJSONIncludesNotifyNewRun(t *testing.T) {
 	}
 }
 
+func TestMarshalJSONReportsPushEnabledWithoutExposingToken(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(Config{PushListen: "127.0.0.1:8787", PushToken: "private-push-token"})
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if got["push_enabled"] != true {
+		t.Fatalf("push_enabled = %#v, want true", got["push_enabled"])
+	}
+	if strings.Contains(string(data), "private-push-token") {
+		t.Fatalf("config JSON exposed push token: %s", data)
+	}
+}
+
 func TestMarshalJSONIncludesCodexHome(t *testing.T) {
 	t.Parallel()
 
@@ -158,6 +177,8 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 		`CTR_GO_ALLOWED_USER_IDS="101 202"`,
 		`CTR_GO_DEFAULT_CWD="` + fileDefaultCWD + `"`,
 		`CTR_GO_NOTIFY_NEW_RUN="off"`,
+		`CTR_GO_PUSH_LISTEN="127.0.0.1:8787"`,
+		`CTR_GO_PUSH_TOKEN="` + strings.Repeat("p", 32) + `"`,
 		"",
 	}, "\n")), 0o600); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
@@ -189,6 +210,9 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	}
 	if cfg.NotifyNewRun {
 		t.Fatal("NotifyNewRun = true, want false from config file")
+	}
+	if cfg.PushListen != "127.0.0.1:8787" || cfg.PushToken != strings.Repeat("p", 32) {
+		t.Fatalf("push config = %q/token-len-%d, want file values", cfg.PushListen, len(cfg.PushToken))
 	}
 }
 

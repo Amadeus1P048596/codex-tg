@@ -112,8 +112,12 @@ Scheduled tasks:
   a task/time-slot in SQLite before dispatch
 - each due occurrence becomes a new thread and turn in the Telegram-private App
   Server using the saved prompt, model, reasoning effort, and optional cwd
-- scheduled threads do not replace the current Telegram binding; normal
-  observer, Home, inbox, approval/input, and terminal paths provide visibility
+- a successful task-management MCP completion records the source thread id and
+  title without changing the task's scheduling update boundary
+- scheduled threads do not replace the current Telegram binding or enter normal
+  observer, Home, inbox, or activity-card surfaces
+- terminal and input-required states emit one unified-push notification with
+  the task name and owning conversation title
 - task ids and paths are validated, unknown native TOML fields survive updates,
   and automation prompts must not contain credentials
 
@@ -124,6 +128,11 @@ Notifications:
 - normal examples: final answer, high-value run start when enabled by adapter policy
 - silent examples: progress deltas, tool output deltas, menu/callback responses
 - digest examples: low-priority automation summaries or scheduled findings
+- the in-process push service owns Telegram target resolution, message shaping,
+  severity, and durable idempotency for both scheduled results and external alerts
+- the optional `POST /v1/push` adapter is disabled by default, requires a
+  separate Bearer Token, rejects caller-supplied Telegram destinations and
+  formatting controls, and must bind an explicit non-wildcard address
 
 Adapter routing:
 

@@ -1,5 +1,22 @@
 # Validation Notes
 
+- 2026-08-31 CST unified push validation replaced scheduled-run conversation
+  cards with one de-duplicated standalone notification that includes the owning
+  conversation title. Scheduler execution threads remain pollable but are
+  filtered from Home, inbox, thread-picker, project, and ordinary panel
+  surfaces. The optional private-network HTTP adapter requires a separate
+  Bearer Token, bounds and validates JSON, accepts no Telegram destination or
+  formatting controls, and fails daemon startup closed when its explicit bind
+  address is unavailable. The bank-gold client now uses this contract without
+  a Bot Token or chat id and retries with a stable idempotency key. Targeted and
+  full Go tests, `go vet ./...`, Windows candidate build, Python unit/compile
+  checks, `git diff --check`, and targeted public private-data scans passed. A
+  non-running NAS candidate image was built and compile-checked while the
+  existing alert container remained running. Existing local task origins were
+  migrated without changing schedule timestamps. No daemon or alert-container
+  restart occurred; real Telegram push readback remains pending explicit
+  operator authorization and private endpoint credential provisioning.
+
 - 2026-08-31 CST Codex-to-Telegram image-output validation confirmed that the
   bridge normalized only text replies and exposed no Telegram `sendPhoto`
   sender method. The fix now forwards terminal `imageGeneration` items,

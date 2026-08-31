@@ -176,6 +176,46 @@ func TestStoreMarksTasksAsTelegramOwnedAndPersistsCWD(t *testing.T) {
 	}
 }
 
+func TestStoreSetsOriginWithoutChangingScheduleBoundary(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 31, 12, 30, 0, 0, time.Local)
+	store := NewStore(t.TempDir(), func() time.Time { return now })
+	created, err := store.Apply(map[string]any{
+		"mode": "create", "name": "Owned task", "prompt": "Report the result.",
+		"rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=30", "status": "ACTIVE", "kind": "cron",
+		"projectId": nil, "model": "gpt-test", "reasoningEffort": "medium", "executionEnvironment": "local",
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	id, _ := created["id"].(string)
+	updatedAt, _ := int64Value(created["updated_at"])
+
+	now = now.Add(2 * time.Hour)
+	if err := store.SetOriginIfMissing(id, "thread-source", "示例计划"); err != nil {
+		t.Fatalf("SetOriginIfMissing failed: %v", err)
+	}
+	viewed, err := store.Apply(map[string]any{"mode": "view", "id": id})
+	if err != nil {
+		t.Fatalf("view failed: %v", err)
+	}
+	if viewed["source_thread_id"] != "thread-source" || viewed["source_thread_title"] != "示例计划" {
+		t.Fatalf("origin = %#v/%#v, want source thread and title", viewed["source_thread_id"], viewed["source_thread_title"])
+	}
+	if got, _ := int64Value(viewed["updated_at"]); got != updatedAt {
+		t.Fatalf("updated_at = %d, want unchanged schedule boundary %d", got, updatedAt)
+	}
+
+	if err := store.SetOriginIfMissing(id, "thread-other", "其他会话"); err != nil {
+		t.Fatalf("second SetOriginIfMissing failed: %v", err)
+	}
+	viewed, _ = store.Apply(map[string]any{"mode": "view", "id": id})
+	if viewed["source_thread_id"] != "thread-source" || viewed["source_thread_title"] != "示例计划" {
+		t.Fatalf("origin was reassigned: %#v", viewed)
+	}
+}
+
 func TestStoreHidesAndProtectsDesktopHeartbeatTasks(t *testing.T) {
 	t.Parallel()
 

@@ -23,6 +23,8 @@ type Task struct {
 	NotificationPolicy   string
 	ExecutionEnvironment string
 	Owner                string
+	SourceThreadID       string
+	SourceThreadTitle    string
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
@@ -67,6 +69,8 @@ func taskFromValues(values map[string]any) (Task, error) {
 		NotificationPolicy:   valueString(values["notification_policy"]),
 		ExecutionEnvironment: valueString(values["execution_environment"]),
 		Owner:                valueString(values["owner"]),
+		SourceThreadID:       valueString(values["source_thread_id"]),
+		SourceThreadTitle:    valueString(values["source_thread_title"]),
 		CreatedAt:            time.UnixMilli(createdMillis),
 		UpdatedAt:            time.UnixMilli(updatedMillis),
 	}

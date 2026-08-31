@@ -71,6 +71,62 @@ func (s *Store) Apply(args map[string]any) (map[string]any, error) {
 	}
 }
 
+// SetOriginIfMissing records the Telegram-private Codex conversation that
+// created a task. Origin metadata is not a schedule edit, so this deliberately
+// preserves updated_at and therefore does not move the next RRULE boundary.
+func (s *Store) SetOriginIfMissing(id, threadID, threadTitle string) error {
+	if strings.TrimSpace(s.root) == "" || s.root == "." {
+		return errors.New("scheduled tasks directory is not configured")
+	}
+	id = strings.TrimSpace(id)
+	threadID = strings.TrimSpace(threadID)
+	threadTitle = strings.TrimSpace(threadTitle)
+	if !validAutomationID(id) {
+		return errors.New("invalid automation id")
+	}
+	if threadID == "" || len([]rune(threadID)) > 160 || strings.ContainsAny(threadID, "\r\n") {
+		return errors.New("invalid source thread id")
+	}
+	if threadTitle == "" || len([]rune(threadTitle)) > 160 || strings.ContainsAny(threadTitle, "\r\n") {
+		return errors.New("invalid source thread title")
+	}
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
+		return fmt.Errorf("create scheduled tasks directory: %w", err)
+	}
+	unlock, err := acquireFileLock(s.root, s.now)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.ensureExistingTaskDir(id); err != nil {
+		return err
+	}
+	path, err := s.taskFile(id)
+	if err != nil {
+		return err
+	}
+	doc, err := readDocument(path)
+	if err != nil {
+		return err
+	}
+	if kind, _ := doc.value("kind").(string); !strings.EqualFold(kind, "cron") {
+		return errors.New("only standalone cron automations can carry Telegram origin metadata")
+	}
+	changed := false
+	if value, _ := doc.value("source_thread_id").(string); strings.TrimSpace(value) == "" {
+		doc.set("source_thread_id", threadID)
+		changed = true
+	}
+	if value, _ := doc.value("source_thread_title").(string); strings.TrimSpace(value) == "" {
+		doc.set("source_thread_title", threadTitle)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return writeDocument(path, doc)
+}
+
 func (s *Store) list() (map[string]any, error) {
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
@@ -523,7 +579,7 @@ func newAutomationDocument(fields map[string]any) *automationDocument {
 	doc := &automationDocument{index: map[string]int{}}
 	order := []string{
 		"version", "id", "kind", "owner", "name", "prompt", "status", "rrule", "cwd", "project_id",
-		"model", "reasoning_effort", "notification_policy", "execution_environment",
+		"model", "reasoning_effort", "notification_policy", "execution_environment", "source_thread_id", "source_thread_title",
 		"created_at", "updated_at",
 	}
 	for _, key := range order {

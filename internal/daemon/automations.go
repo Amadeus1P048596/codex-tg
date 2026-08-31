@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,6 +37,14 @@ func automationRunStateKey(taskID string) string {
 
 func automationThreadStateKey(threadID string) string {
 	return automationThreadPrefix + strings.TrimSpace(threadID)
+}
+
+func (s *Service) isAutomationExecutionThread(ctx context.Context, threadID string) bool {
+	if strings.TrimSpace(threadID) == "" {
+		return false
+	}
+	taskID, err := s.store.GetState(ctx, automationThreadStateKey(threadID))
+	return err == nil && strings.TrimSpace(taskID) != ""
 }
 
 func (s *Service) automationLoop(ctx context.Context) {
@@ -112,7 +119,7 @@ func (s *Service) runAutomationTick(ctx context.Context) {
 			claim.Error = sanitizeDiagnosticString(runErr.Error())
 			_ = s.saveAutomationRunState(ctx, task.ID, claim)
 			s.recordAutomationSchedulerError(ctx, fmt.Errorf("task %s failed: %w", task.ID, runErr))
-			s.notifyAutomationStartFailure(ctx, *target, task, claim.Error)
+			s.notifyAutomationStartFailure(ctx, task, claim)
 			continue
 		}
 		claim.Status = "running"
@@ -144,7 +151,7 @@ func (s *Service) automationTarget(ctx context.Context) (*model.ObserverTarget, 
 		return nil, err
 	}
 	if target == nil || !target.Enabled {
-		return nil, errors.New("no Telegram observer target is configured for scheduled-task results")
+		return nil, errors.New("no Telegram push target is configured for scheduled-task results")
 	}
 	return target, nil
 }
@@ -283,6 +290,120 @@ func (s *Service) updateAutomationRunFromSnapshot(ctx context.Context, thread mo
 	_ = s.saveAutomationRunState(ctx, taskID, state)
 }
 
+// syncAutomationPush owns presentation for scheduler-created threads. Their
+// internal App Server threads remain isolated execution contexts, but they do
+// not create or update normal Telegram conversation cards.
+func (s *Service) syncAutomationPush(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) bool {
+	if snapshot == nil || strings.TrimSpace(thread.ID) == "" {
+		return false
+	}
+	taskID, err := s.store.GetState(ctx, automationThreadStateKey(thread.ID))
+	if err != nil || strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	s.updateAutomationRunFromSnapshot(ctx, thread, snapshot)
+	state := notificationStateForStatus(
+		readableStatus(snapshot.LatestTurnStatus, thread.Status),
+		snapshot.WaitingOnApproval || snapshot.WaitingOnReply || snapshot.PlanPrompt != nil,
+	)
+	if state == notificationRunning {
+		return true
+	}
+	task, found, err := s.automationTask(taskID)
+	if err != nil {
+		s.recordAutomationSchedulerError(ctx, fmt.Errorf("load task %s for push: %w", taskID, err))
+		return true
+	}
+	if !found {
+		s.recordAutomationSchedulerError(ctx, fmt.Errorf("load task %s for push: task not found", taskID))
+		return true
+	}
+	if state == notificationCompleted && strings.EqualFold(strings.TrimSpace(task.NotificationPolicy), "failed_runs_only") {
+		return true
+	}
+	run := s.loadAutomationRunState(ctx, taskID)
+	body := automationPushBody(state, snapshot, run)
+	conversationTitle := s.automationConversationTitle(ctx, task)
+	fingerprint := firstNonEmpty(snapshot.LatestFinalFP, snapshot.LatestProgressFP, snapshot.LatestTurnID, run.TurnID)
+	idempotencyKey := fmt.Sprintf("automation:%s:%d:%s:%s:%s", task.ID, run.SlotUnixMilli, firstNonEmpty(snapshot.LatestTurnID, run.TurnID), state, fingerprint)
+	_, err = s.publishPush(ctx, PushRequest{
+		Source:            "codex-tg 定时任务",
+		Title:             compactPushText("定时任务 · "+task.Name, pushTitleMaxRunes),
+		Body:              compactPushBody(body),
+		ConversationTitle: compactPushText(conversationTitle, pushConversationMaxRunes),
+		Severity:          "normal",
+		IdempotencyKey:    idempotencyKey,
+	})
+	if err != nil {
+		s.recordAutomationSchedulerError(ctx, fmt.Errorf("push task %s result: %w", task.ID, err))
+	}
+	return true
+}
+
+func (s *Service) automationTask(taskID string) (automation.Task, bool, error) {
+	tasks, err := automation.NewStore(s.cfg.AutomationsDir, s.automationNow).ListTasks()
+	if err != nil {
+		return automation.Task{}, false, err
+	}
+	for _, task := range tasks {
+		if task.ID == strings.TrimSpace(taskID) {
+			return task, true, nil
+		}
+	}
+	return automation.Task{}, false, nil
+}
+
+func (s *Service) automationConversationTitle(ctx context.Context, task automation.Task) string {
+	if strings.TrimSpace(task.SourceThreadID) != "" {
+		if sourceThread, err := s.store.GetThread(ctx, task.SourceThreadID); err == nil && sourceThread != nil {
+			if title := threadSelectionTitle(*sourceThread); title != "" {
+				return title
+			}
+		}
+	}
+	return firstNonEmpty(task.SourceThreadTitle, "未关联会话")
+}
+
+func automationPushBody(state notificationState, snapshot *appserver.ThreadReadSnapshot, run automationRunState) string {
+	if snapshot == nil {
+		return "定时任务没有返回可读取的结果。"
+	}
+	switch state {
+	case notificationCompleted:
+		return firstNonEmpty(snapshot.LatestFinalText, "定时任务已完成。")
+	case notificationNeedsInput:
+		if snapshot.PlanPrompt != nil {
+			return firstNonEmpty(snapshot.PlanPrompt.Question, "定时任务正在等待输入。")
+		}
+		return "定时任务正在等待输入或授权。"
+	case notificationFailed:
+		return firstNonEmpty(snapshot.LatestFinalText, run.Error, snapshot.LatestProgressText, "定时任务执行失败。")
+	case notificationCancelled:
+		return firstNonEmpty(snapshot.LatestFinalText, "定时任务已取消。")
+	default:
+		return firstNonEmpty(snapshot.LatestProgressText, "定时任务状态已更新。")
+	}
+}
+
+func compactPushBody(value string) string {
+	const suffix = "\n\n…（结果已截断）"
+	value = strings.TrimSpace(value)
+	limit := pushMessageBodyMaxRunes - len([]rune(suffix))
+	if len([]rune(value)) <= pushMessageBodyMaxRunes {
+		return value
+	}
+	return strings.TrimSpace(string([]rune(value)[:limit])) + suffix
+}
+
+func compactPushText(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	runes := []rune(value)
+	if limit <= 0 || len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:limit-1])) + "…"
+}
+
 func (s *Service) saveAutomationWaitingState(ctx context.Context, taskID string, err error) {
 	now := s.automationNow().UTC().Format(time.RFC3339Nano)
 	state := automationRunState{Status: "waiting", UpdatedAt: now, Error: sanitizeDiagnosticString(err.Error())}
@@ -299,18 +420,68 @@ func (s *Service) recordAutomationSchedulerError(ctx context.Context, err error)
 	s.logLifecycle("automation_scheduler_error", lifecycleFields{"error": message})
 }
 
-func (s *Service) notifyAutomationStartFailure(ctx context.Context, target model.ObserverTarget, task automation.Task, message string) {
-	s.mu.RLock()
-	sender := s.sender
-	s.mu.RUnlock()
-	if sender == nil {
+func (s *Service) notifyAutomationStartFailure(ctx context.Context, task automation.Task, run automationRunState) {
+	_, _ = s.publishPush(ctx, PushRequest{
+		Source:            "codex-tg 定时任务",
+		Title:             compactPushText("定时任务启动失败 · "+task.Name, pushTitleMaxRunes),
+		Body:              compactPushBody(firstNonEmpty(run.Error, "无法启动定时任务。")),
+		ConversationTitle: compactPushText(s.automationConversationTitle(ctx, task), pushConversationMaxRunes),
+		Severity:          "normal",
+		IdempotencyKey:    fmt.Sprintf("automation:%s:%d:start-failed", task.ID, run.SlotUnixMilli),
+	})
+}
+
+func (s *Service) captureAutomationOriginFromEvent(ctx context.Context, event appserver.Event, thread model.Thread) {
+	if strings.TrimSpace(s.cfg.AutomationsDir) == "" || event.Channel != "notification" || !strings.EqualFold(strings.TrimSpace(event.Method), "item/completed") {
 		return
 	}
-	text := "⏰ <b>定时任务启动失败</b>\n\n" + html.EscapeString(task.Name)
-	if strings.TrimSpace(message) != "" {
-		text += "\n" + html.EscapeString(message)
+	item, _ := event.Params["item"].(map[string]any)
+	if !strings.EqualFold(payloadMapString(item, "type"), "mcpToolCall") ||
+		!strings.EqualFold(payloadMapString(item, "tool"), "automation_update") ||
+		!strings.EqualFold(payloadMapString(item, "status"), "completed") {
+		return
 	}
-	_, _ = sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{{
-		Text: text, ParseMode: "HTML", PlainText: "定时任务启动失败\n\n" + task.Name + "\n" + message,
-	}}, nil, notifySendOptions())
+	arguments, _ := item["arguments"].(map[string]any)
+	mode := strings.ToLower(payloadMapString(arguments, "mode"))
+	if mode != "create" && mode != "update" {
+		return
+	}
+	taskID := payloadMapString(arguments, "id")
+	if taskID == "" {
+		taskID = automationIDFromMCPResult(item["result"])
+	}
+	threadID := firstNonEmpty(thread.ID, threadIDFromEvent(event))
+	title := strings.TrimSpace(thread.Title)
+	if manualTitle, err := s.store.GetState(ctx, manualThreadTitleStateKey(threadID)); err == nil {
+		title = firstNonEmpty(manualTitle, title)
+	}
+	title = compactPushText(firstNonEmpty(title, "未命名会话"), pushConversationMaxRunes)
+	if taskID == "" || threadID == "" {
+		return
+	}
+	if err := automation.NewStore(s.cfg.AutomationsDir, s.automationNow).SetOriginIfMissing(taskID, threadID, title); err != nil {
+		s.recordAutomationSchedulerError(ctx, fmt.Errorf("attach task origin: %w", err))
+	}
+}
+
+func automationIDFromMCPResult(result any) string {
+	resultMap, _ := result.(map[string]any)
+	if id := payloadMapString(resultMap, "id"); id != "" {
+		return id
+	}
+	content, _ := resultMap["content"].([]any)
+	for _, raw := range content {
+		entry, _ := raw.(map[string]any)
+		text := payloadMapString(entry, "text")
+		if text == "" {
+			continue
+		}
+		var decoded map[string]any
+		if json.Unmarshal([]byte(text), &decoded) == nil {
+			if id := payloadMapString(decoded, "id"); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
