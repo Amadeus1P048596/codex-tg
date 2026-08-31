@@ -48,6 +48,7 @@ type Config struct {
 	Paths                       Paths
 	CodexBin                    string
 	CodexHome                   string
+	AutomationsDir              string
 	AppServerListen             string
 	FullAccess                  bool
 	TelegramBotToken            string
@@ -134,6 +135,7 @@ func fromSource(source envSource) Config {
 		Paths:                       paths,
 		CodexBin:                    codexBin,
 		CodexHome:                   source.path("CTR_GO_CODEX_HOME", ""),
+		AutomationsDir:              source.path("CTR_GO_AUTOMATIONS_DIR", ""),
 		AppServerListen:             listen,
 		FullAccess:                  source.bool("CTR_GO_FULL_ACCESS", false),
 		TelegramBotToken:            source.first("CTR_GO_TELEGRAM_BOT_TOKEN", "CTR_TELEGRAM_BOT_TOKEN"),
@@ -163,6 +165,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		DBPath                      string  `json:"db_path"`
 		CodexBin                    string  `json:"codex_bin"`
 		CodexHome                   string  `json:"codex_home"`
+		AutomationsDir              string  `json:"automations_dir"`
 		AppServerListen             string  `json:"app_server_listen"`
 		FullAccess                  bool    `json:"full_access"`
 		HasTelegramToken            bool    `json:"telegram_configured"`
@@ -186,6 +189,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		DBPath:                      c.Paths.DBPath,
 		CodexBin:                    c.CodexBin,
 		CodexHome:                   c.CodexHome,
+		AutomationsDir:              c.AutomationsDir,
 		AppServerListen:             c.AppServerListen,
 		FullAccess:                  c.FullAccess,
 		HasTelegramToken:            c.TelegramBotToken != "",
@@ -213,6 +217,14 @@ func DefaultCodexChatsRoot() string {
 		return filepath.Join("Documents", "Codex")
 	}
 	return filepath.Join(userHome, "Documents", "Codex")
+}
+
+func DefaultAutomationsDir() string {
+	userHome, _ := os.UserHomeDir()
+	if strings.TrimSpace(userHome) == "" {
+		return filepath.Join(".codex", "automations")
+	}
+	return filepath.Join(userHome, ".codex", "automations")
 }
 
 func ConfigFilePath() string {

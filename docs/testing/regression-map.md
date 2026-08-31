@@ -52,6 +52,7 @@ Primary tests:
 - `internal/config/config_test.go::TestLoadAppliesRuntimeProxyEnvFromConfigFile`
 - `internal/config/config_test.go::TestLoadDoesNotOverrideExplicitRuntimeProxyEnv`
 - `cmd/ctr-go/main_test.go::TestRunInitWritesPrivateConfigAndRefusesOverwrite`
+- `cmd/ctr-go/main_test.go::TestRunAutomationMCPUsesConfiguredNativeStore`
 - `cmd/ctr-go/main_test.go::TestRunInitForceOverwritesConfig`
 - `cmd/ctr-go/main_test.go::TestStatusAndDoctorDoNotLeakConfigFileToken`
 - `cmd/ctr-go/main_test.go::TestFatalErrorSanitizerRedactsTelegramBotURL`
@@ -80,6 +81,39 @@ Contract notes:
   applied by the process after startup.
 - Tray control is not a settings editor in v0.4.0.
 - Release archives and packages must not include local config, sessions, SQLite state, logs, or screenshots.
+
+## Telegram Scheduled Tasks Bridge
+
+ADR: `docs/adr/ADR-022-telegram-scheduled-tasks-bridge.md`; feature brief is
+`docs/process/telegram-scheduled-tasks-brief.md`.
+
+Primary tests:
+
+- `internal/automation/store_test.go::TestStoreCRUDPreservesUnknownFields`
+- `internal/automation/store_test.go::TestStoreRejectsUnsafeOrUnsupportedAutomation`
+- `internal/automation/store_test.go::TestStoreRequiresNativeCronRuntimeFields`
+- `internal/automation/store_test.go::TestStoreHidesAndProtectsDesktopHeartbeatTasks`
+- `internal/automation/mcp_test.go::TestServeMCPListsAndCallsAutomationTool`
+- `internal/automation/mcp_test.go::TestServeMCPReturnsToolErrorsAsMCPContent`
+- `internal/appserver/client_test.go::TestAutomationMCPConfigUsesExplicitBinaryAndDirectory`
+- `internal/appserver/client_test.go::TestAutomationMCPConfigIsInjectedIntoThreadStartAndResume`
+- `internal/appserver/client_test.go::TestAutomationMCPConfigIsDisabledWithoutDirectory`
+- `internal/config/config_test.go::TestLoadReadsConfigFileAndEnvOverridesIt`
+- `cmd/ctr-go/main_test.go::TestRunInitWritesPrivateConfigAndRefusesOverwrite`
+- `cmd/ctr-go/service_test.go::TestServiceInstallInteractiveWizardRetriesInvalidValues`
+
+Contract notes:
+
+- App Server still owns Telegram interactive thread state. The injected MCP
+  server is a narrow orchestration adapter under ADR-019.
+- `CTR_GO_AUTOMATIONS_DIR` is the only shared mutable boundary introduced by
+  this feature; sessions, runtime databases, locks, and caches stay isolated.
+- Both `thread/start` and `thread/resume` must receive the MCP config so existing
+  Telegram threads gain the tool without rollout rewrites.
+- Only native standalone `cron` tasks are accepted. Desktop is the only
+  scheduler; heartbeat tasks targeting Telegram threads are invalid.
+- Direct MCP/native-store smoke does not prove Desktop execution. Operator QA
+  must also confirm the task appears in Desktop and can be run on schedule.
 
 ## Plan Mode Routing
 

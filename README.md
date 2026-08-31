@@ -7,7 +7,8 @@ OpenAI Codex App Server，把手机变成查看任务进度、切换会话、发
 当前模式是“**独立会话，共享记忆与 Skills**”：Telegram 不复用 Windows Codex
 客户端的 App Server、会话目录或运行时数据库；在 Codex runtime 层，两端只通过明确配置的
 资源链接共享 Skills、plugins、全局规则等能力，并通过独立的应用级记忆库共享用户明确批准的
-持久信息。项目 workspace 仍可按配置指向同一批本地目录。
+持久信息。项目 workspace 仍可按配置指向同一批本地目录；另外可以显式共享 Codex Desktop
+的 Scheduled tasks **定义目录**，但执行器、会话和历史仍然归 Desktop 所有。
 
 最近发布标签：[`v0.5.0-amadeus.1`](https://github.com/Amadeus1P048596/codex-tg/releases/tag/v0.5.0-amadeus.1)，
 基于上游 `v0.5.0`。当前分支还包含 `Unreleased` 修正，目前均以源码形式提供。
@@ -123,6 +124,24 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
 图片不会误投当前会话，机器人会提示先发送纯文本标题。媒体组、用图片充当标题，以及给单行
 `/newchat <提示词>` 或 `/newthread <提示词>` 命令附图，当前不在支持范围内。
 
+### 定时任务
+
+配置 `CTR_GO_AUTOMATIONS_DIR` 后，可以直接在 Telegram 会话里用自然语言要求 Codex 创建、
+查看、修改或删除 Scheduled tasks。codex-tg 会在新建和恢复会话时注入一个本地
+`automation_update` 工具，把任务写成 Codex Desktop 的原生任务定义；不需要开放网络端口，
+也不会让 Telegram App Server 读取 Desktop 会话。
+
+- Telegram 只能创建独立运行的 `cron` 任务。绑定某条 Desktop 会话续跑的 `heartbeat`
+  不受支持，因为 TG 与 Desktop 的 thread 空间按设计相互隔离。
+- Codex Desktop 是唯一的调度、执行、历史和通知入口；本地任务需要 Desktop 保持运行。
+  codex-tg 不会再启动一套调度器，因此不会重复执行同一个任务。
+- 每次运行使用 Desktop 为 Scheduled tasks 配置的 sandbox 和权限，不继承 TG daemon 的会话状态。
+- 定时执行结果出现在 Desktop 的 Scheduled tasks 界面与通知中，不会冒充 TG 会话的 turn。
+- 任务提示词以明文保存在本机任务目录，不应包含 token、密码或其他秘密。
+
+新安装会由 `ctr-go init` 填入默认的 `~/.codex/automations`。已有配置不会被静默扩大写入边界，
+需要手动增加该变量；留空则完全禁用这项能力。
+
 ## 工作方式
 
 ```text
@@ -132,7 +151,8 @@ Windows Codex 客户端                         Telegram
 Desktop CODEX_HOME                        codex-tg Go daemon
    ├── Desktop sessions                     ├── daemon SQLite
    ├── state / writer locks                 ├── live App Server（写入）
-   └── runtime cache                        └── poll App Server（只读）
+   ├── runtime cache                        └── poll App Server（只读）
+   └── automations ◀── 可选本地 MCP 写入 ───────┘
                                                   │ 本机 stdio
                                                   ▼
                                           Telegram CODEX_HOME
@@ -140,7 +160,8 @@ Desktop CODEX_HOME                        codex-tg Go daemon
                                              ├── state / writer locks
                                              └── runtime cache
 
-runtime 层只共享：Skills / plugins / packages / 全局规则 + 独立的应用级持久记忆库
+runtime 层不共享会话状态；只显式链接 Skills / plugins / packages / 全局规则，
+并可独立共享应用级持久记忆与 Scheduled task 定义
 项目层可按配置使用同一 workspace
 ```
 
@@ -182,7 +203,8 @@ go run ./cmd/ctr-go doctor
 
 `init` 会引导填写 Telegram token、允许的用户、默认工作目录等信息，并默认写入
 `~/.codex-tg/config.env`。新配置会把 `CTR_GO_CODEX_HOME` 默认设为
-`~/.codex-tg/codex-home`，从一开始就与 Windows Codex 客户端隔离。也可以通过
+`~/.codex-tg/codex-home`，从一开始就与 Windows Codex 客户端隔离；同时询问 Desktop
+Scheduled tasks 目录，默认使用 `~/.codex/automations`。也可以通过
 `CTR_GO_CONFIG` 指定其他配置路径；显式环境变量的优先级高于配置文件。
 
 隔离 home 需要自己的 Codex 授权文件。首次使用时，请把 `CODEX_HOME` 临时指向该目录，
@@ -196,6 +218,7 @@ $env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
 $env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
 $env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
 $env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
+$env:CTR_GO_AUTOMATIONS_DIR = "C:\Users\you\.codex\automations"
 ```
 
 ### 3. 启动守护进程
@@ -277,6 +300,7 @@ ctr-go version
 | `CTR_GO_CODEX_CHATS_ROOT` | Codex UI Chat 根目录，默认 `~/Documents/Codex` |
 | `CTR_GO_CODEX_BIN` | Codex CLI 可执行文件路径或命令名 |
 | `CTR_GO_CODEX_HOME` | 仅传给 TG 子 App Server 的独立 `CODEX_HOME`；新配置默认 `~/.codex-tg/codex-home` |
+| `CTR_GO_AUTOMATIONS_DIR` | 可选的 Desktop 原生 Scheduled tasks 定义目录；新配置默认 `~/.codex/automations`，已有配置需显式添加 |
 | `CTR_GO_CONFIG` | 自定义 `config.env` 路径 |
 | `CTR_GO_HOME` | 自定义 daemon 数据、日志和 SQLite 根目录 |
 | `CTR_GO_PANEL_MODE` | `per_run`（默认）或 `stable` |
@@ -321,6 +345,12 @@ $env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
 全局配置。若安装了本机 `shared-memory` Skill，两端还可以使用
 `~/.codex-shared/memory/memory.sqlite`（或 `CODEX_SHARED_MEMORY_PATH`）共享用户明确批准的
 稳定事实、偏好和协作约定。
+
+`CTR_GO_AUTOMATIONS_DIR` 是另一个明确但更窄的共享边界：它只允许 TG 会话通过受限的本地
+MCP 工具读写 Desktop 原生 Scheduled task 定义。它不会链接 session、thread history、
+SQLite、writer lock 或缓存，也不会让 codex-tg 执行任务。把调度权保留给 Desktop，可以避免
+两个进程重复触发任务；只允许独立 `cron`，则避免把 TG thread id 写进 Desktop 无法恢复的
+`heartbeat` 任务。
 
 共享记忆不等于共享聊天记录：conversation、thread/run id、临时任务状态、凭据和秘密都不应
 写入该记忆库。Desktop 与 Telegram 之间也绝不能复制或链接 `sessions`、

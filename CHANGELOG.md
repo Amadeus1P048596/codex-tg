@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Adds an opt-in native Scheduled tasks bridge: new and resumed Telegram
+  threads receive a private stdio MCP tool that writes validated standalone
+  cron definitions to the configured Desktop automation store, while Desktop
+  remains the only scheduler and heartbeat/thread state stays isolated.
 - Clarified and enforced the current deployment boundary: Telegram uses its own
   App Servers and mutable Codex runtime state rather than sharing the Windows
   Codex Desktop App Server or session databases.

@@ -140,14 +140,16 @@ func New(cfg config.Config) (*Service, error) {
 	}
 	service.liveFactory = func() Session {
 		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout, appserver.ClientOptions{
-			FullAccess: cfg.FullAccess,
-			CodexHome:  cfg.CodexHome,
+			FullAccess:     cfg.FullAccess,
+			CodexHome:      cfg.CodexHome,
+			AutomationsDir: cfg.AutomationsDir,
 		})
 	}
 	service.pollFactory = func() Session {
 		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout, appserver.ClientOptions{
-			FullAccess: cfg.FullAccess,
-			CodexHome:  cfg.CodexHome,
+			FullAccess:     cfg.FullAccess,
+			CodexHome:      cfg.CodexHome,
+			AutomationsDir: cfg.AutomationsDir,
 		})
 	}
 	service.live = service.liveFactory()

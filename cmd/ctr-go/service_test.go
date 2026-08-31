@@ -31,6 +31,7 @@ func TestServiceInstallNonInteractiveWritesConfigAndLaunchAgent(t *testing.T) {
 		"--allowed-user-ids", "42",
 		"--default-cwd", dir,
 		"--codex-chats-root", filepath.Join(dir, "Codex"),
+		"--automations-dir", filepath.Join(dir, "automations"),
 		"--codex-bin", binary,
 		"--ctr-go-bin", binary,
 		"--notify-new-run", "false",
@@ -50,6 +51,7 @@ func TestServiceInstallNonInteractiveWritesConfigAndLaunchAgent(t *testing.T) {
 		`CTR_GO_TELEGRAM_BOT_TOKEN="` + token + `"`,
 		`CTR_GO_ALLOWED_USER_IDS="42"`,
 		`CTR_GO_CODEX_HOME=` + strconv.Quote(filepath.Join(home, "codex-home")),
+		`CTR_GO_AUTOMATIONS_DIR=` + strconv.Quote(filepath.Join(dir, "automations")),
 		`CTR_GO_NOTIFY_NEW_RUN="false"`,
 	} {
 		if !strings.Contains(text, want) {
@@ -192,6 +194,7 @@ func TestServiceInstallInteractiveWizardRetriesInvalidValues(t *testing.T) {
 		dir,
 		filepath.Join(dir, "Codex"),
 		filepath.Join(home, "codex-home"),
+		filepath.Join(home, "desktop-automations"),
 		binary,
 		"maybe",
 		"true",
@@ -213,8 +216,9 @@ func TestServiceInstallInteractiveWizardRetriesInvalidValues(t *testing.T) {
 	}
 	for _, want := range []string{
 		"codex-tg service setup",
-		"[1/8] Telegram bot token",
-		"[6/8] Telegram Codex runtime home",
+		"[1/9] Telegram bot token",
+		"[6/9] Telegram Codex runtime home",
+		"[7/9] Codex Desktop Scheduled tasks directory",
 		"Telegram bot token should look like",
 		"ids must be integers",
 		"value must be true or false",

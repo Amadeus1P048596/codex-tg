@@ -53,6 +53,7 @@ func TestRunInitWritesPrivateConfigAndRefusesOverwrite(t *testing.T) {
 		filepath.Join(dir, "project"),
 		filepath.Join(dir, "chats"),
 		"",
+		filepath.Join(dir, "automations"),
 		"codex",
 		"false",
 		"",
@@ -75,6 +76,7 @@ func TestRunInitWritesPrivateConfigAndRefusesOverwrite(t *testing.T) {
 		`CTR_GO_ALLOWED_USER_IDS="42"`,
 		`CTR_GO_CODEX_BIN="codex"`,
 		`CTR_GO_CODEX_HOME=` + strconv.Quote(filepath.Join(home, "codex-home")),
+		`CTR_GO_AUTOMATIONS_DIR=` + strconv.Quote(filepath.Join(dir, "automations")),
 		`CTR_GO_NOTIFY_NEW_RUN="false"`,
 	} {
 		if !strings.Contains(text, want) {
@@ -109,6 +111,7 @@ func TestRunInitForceOverwritesConfig(t *testing.T) {
 		filepath.Join(dir, "project"),
 		filepath.Join(dir, "chats"),
 		filepath.Join(dir, "codex-home"),
+		filepath.Join(dir, "automations"),
 		"codex",
 		"true",
 		"",
@@ -123,6 +126,18 @@ func TestRunInitForceOverwritesConfig(t *testing.T) {
 	}
 	if strings.Contains(string(data), "old=true") {
 		t.Fatalf("config was not overwritten:\n%s", data)
+	}
+}
+
+func TestRunAutomationMCPUsesConfiguredNativeStore(t *testing.T) {
+	t.Setenv("CTR_GO_AUTOMATIONS_DIR", t.TempDir())
+	request := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` + "\n"
+	var out bytes.Buffer
+	if err := runWithIO([]string{"automation-mcp"}, strings.NewReader(request), &out); err != nil {
+		t.Fatalf("automation-mcp failed: %v", err)
+	}
+	if !strings.Contains(out.String(), `"name":"automation_update"`) {
+		t.Fatalf("automation-mcp response missing tool: %s", out.String())
 	}
 }
 

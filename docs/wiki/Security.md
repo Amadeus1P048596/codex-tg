@@ -15,6 +15,9 @@
   contain credentials, so treat the config file as secret material.
 - The macOS tray app controls service lifecycle and opens local files, but it
   does not read or display Telegram tokens.
+- Scheduled task access is disabled unless `CTR_GO_AUTOMATIONS_DIR` is set. When
+  enabled, the private stdio MCP adapter accepts only validated child task ids
+  and native cron fields; it does not expose a network listener.
 
 ## Never Commit
 
@@ -47,3 +50,8 @@ command, permission, or MCP requests.
 Secrets stay in the local config file today. A future Keychain migration is
 allowed, but runtime docs and logs must continue to avoid printing secrets in
 full.
+
+Scheduled task prompts are stored as local plaintext in the Desktop automation
+directory. Do not put tokens, passwords, private keys, or other credentials in
+them. Never configure the bridge path to a session, database, or broad home
+directory.

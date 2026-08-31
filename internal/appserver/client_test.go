@@ -71,6 +71,56 @@ func TestBuildCommandScopesCodexHomeToAppServer(t *testing.T) {
 	}
 }
 
+func TestAutomationMCPConfigUsesExplicitBinaryAndDirectory(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("codex", "stdio://", t.TempDir(), time.Second, ClientOptions{
+		AutomationCommand: `C:\apps\codex-tg\ctr-go.exe`,
+		AutomationsDir:    `C:\profiles\desktop\.codex\automations`,
+	})
+	config := client.automationMCPConfig()
+	if got := config["mcp_servers.codex_tg_automations.command"]; got != `C:\apps\codex-tg\ctr-go.exe` {
+		t.Fatalf("command = %#v", got)
+	}
+	args, ok := config["mcp_servers.codex_tg_automations.args"].([]string)
+	if !ok || len(args) != 1 || args[0] != "automation-mcp" {
+		t.Fatalf("args = %#v", config["mcp_servers.codex_tg_automations.args"])
+	}
+	if got := config["mcp_servers.codex_tg_automations.env.CTR_GO_AUTOMATIONS_DIR"]; got != `C:\profiles\desktop\.codex\automations` {
+		t.Fatalf("automations dir = %#v", got)
+	}
+}
+
+func TestAutomationMCPConfigIsInjectedIntoThreadStartAndResume(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("codex", "stdio://", t.TempDir(), time.Second, ClientOptions{
+		AutomationCommand: `C:\apps\codex-tg\ctr-go.exe`,
+		AutomationsDir:    `C:\profiles\desktop\.codex\automations`,
+	})
+	for operation, params := range map[string]map[string]any{
+		"start":  client.threadStartParams(`C:\workspace`),
+		"resume": client.threadResumeParams("thread-1", `C:\workspace`),
+	} {
+		config, ok := params["config"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s config = %#v, want map", operation, params["config"])
+		}
+		if got := config["mcp_servers.codex_tg_automations.command"]; got != `C:\apps\codex-tg\ctr-go.exe` {
+			t.Fatalf("%s automation command = %#v", operation, got)
+		}
+	}
+}
+
+func TestAutomationMCPConfigIsDisabledWithoutDirectory(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("codex", "stdio://", t.TempDir(), time.Second)
+	if got := client.automationMCPConfig(); got != nil {
+		t.Fatalf("automationMCPConfig = %#v, want nil", got)
+	}
+}
+
 func TestHandlePayloadIgnoresStaleGeneration(t *testing.T) {
 	t.Parallel()
 

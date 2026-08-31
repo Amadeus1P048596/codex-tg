@@ -121,9 +121,11 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	envDefaultCWD := filepath.Join(dir, "from-env")
 	home := filepath.Join(dir, "home")
 	codexHome := filepath.Join(dir, "codex-home")
+	automationsDir := filepath.Join(dir, "desktop-automations")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
 		`CTR_GO_HOME="` + home + `"`,
 		`CTR_GO_CODEX_HOME="` + codexHome + `"`,
+		`CTR_GO_AUTOMATIONS_DIR="` + automationsDir + `"`,
 		`CTR_GO_TELEGRAM_BOT_TOKEN="file-token"`,
 		`CTR_GO_ALLOWED_USER_IDS="101 202"`,
 		`CTR_GO_DEFAULT_CWD="` + fileDefaultCWD + `"`,
@@ -153,6 +155,9 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	}
 	if cfg.CodexHome != codexHome {
 		t.Fatalf("CodexHome = %q, want %q", cfg.CodexHome, codexHome)
+	}
+	if cfg.AutomationsDir != automationsDir {
+		t.Fatalf("AutomationsDir = %q, want %q", cfg.AutomationsDir, automationsDir)
 	}
 	if cfg.NotifyNewRun {
 		t.Fatal("NotifyNewRun = true, want false from config file")

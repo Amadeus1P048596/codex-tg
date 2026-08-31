@@ -1,5 +1,17 @@
 # Validation Notes
 
+- 2026-08-31 CST Scheduled tasks bridge validation added a private stdio MCP
+  server and injected it into both new and resumed Telegram App Server threads
+  when `CTR_GO_AUTOMATIONS_DIR` is configured. Store/MCP/config regression tests,
+  full `go test ./...`, `go build -buildvcs=false ./...`, `go vet ./...`,
+  `git diff --check`, and targeted private-data scans passed. A real Codex App
+  Server 0.148.0 `thread/start` smoke discovered the injected
+  `automation_update` tool. A paused native cron definition was created, read,
+  and deleted in the real Desktop automation directory with no task or temp-file
+  residue. End-to-end scheduled execution and Desktop UI visibility were not
+  exercised because that would require leaving an actual task for the Desktop
+  runner; they remain operator QA rather than a unit/protocol claim.
+
 - 2026-08-28 CST pending-new-session photo validation reproduced that
   `HandleMessageWithLocalImages` skipped the title-then-prompt consumer and sent
   a captioned photo to the previous binding. The image handler now gives pending

@@ -42,6 +42,8 @@ type Client struct {
 	cwd            string
 	requestTimeout time.Duration
 	fullAccess     bool
+	automationsDir string
+	automationCmd  string
 
 	startMu        sync.Mutex
 	rolloutPathMu  sync.Mutex
@@ -64,14 +66,20 @@ type Client struct {
 }
 
 type ClientOptions struct {
-	FullAccess bool
-	CodexHome  string
+	FullAccess        bool
+	CodexHome         string
+	AutomationsDir    string
+	AutomationCommand string
 }
 
 func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration, options ...ClientOptions) *Client {
 	clientOptions := ClientOptions{}
 	if len(options) > 0 {
 		clientOptions = options[0]
+	}
+	automationCommand := strings.TrimSpace(clientOptions.AutomationCommand)
+	if automationCommand == "" && strings.TrimSpace(clientOptions.AutomationsDir) != "" {
+		automationCommand, _ = os.Executable()
 	}
 	return &Client{
 		codexBin:       codexBin,
@@ -80,6 +88,8 @@ func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration, op
 		cwd:            cwd,
 		requestTimeout: requestTimeout,
 		fullAccess:     clientOptions.FullAccess,
+		automationsDir: strings.TrimSpace(clientOptions.AutomationsDir),
+		automationCmd:  automationCommand,
 		preparedPaths:  map[string]struct{}{},
 		resumedPaths:   map[string]struct{}{},
 		pending:        map[uint64]chan rpcResponse{},
@@ -427,6 +437,16 @@ func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[st
 	if err := c.prepareThreadRolloutPath(threadID); err != nil {
 		return nil, fmt.Errorf("prepare thread resume: %w", err)
 	}
+	params := c.threadResumeParams(threadID, cwd)
+	result, err := c.Request(ctx, "thread/resume", params)
+	if err != nil {
+		return nil, err
+	}
+	c.markThreadRolloutResumed(threadID)
+	return asMap(result), nil
+}
+
+func (c *Client) threadResumeParams(threadID, cwd string) map[string]any {
 	params := map[string]any{
 		"threadId":               threadID,
 		"persistExtendedHistory": true,
@@ -434,12 +454,10 @@ func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[st
 	if strings.TrimSpace(cwd) != "" {
 		params["cwd"] = cwd
 	}
-	result, err := c.Request(ctx, "thread/resume", params)
-	if err != nil {
-		return nil, err
+	if config := c.automationMCPConfig(); len(config) > 0 {
+		params["config"] = config
 	}
-	c.markThreadRolloutResumed(threadID)
-	return asMap(result), nil
+	return params
 }
 
 func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string, options TurnStartOptions) (map[string]any, error) {
@@ -794,6 +812,14 @@ func boolValue(value any) bool {
 }
 
 func (c *Client) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/start", c.threadStartParams(cwd))
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) threadStartParams(cwd string) map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": true,
@@ -801,11 +827,23 @@ func (c *Client) ThreadStart(ctx context.Context, cwd string) (map[string]any, e
 	if strings.TrimSpace(cwd) != "" {
 		params["cwd"] = cwd
 	}
-	result, err := c.Request(ctx, "thread/start", params)
-	if err != nil {
-		return nil, err
+	if config := c.automationMCPConfig(); len(config) > 0 {
+		params["config"] = config
 	}
-	return asMap(result), nil
+	return params
+}
+
+func (c *Client) automationMCPConfig() map[string]any {
+	if strings.TrimSpace(c.automationsDir) == "" || strings.TrimSpace(c.automationCmd) == "" {
+		return nil
+	}
+	return map[string]any{
+		"mcp_servers.codex_tg_automations.command":                    c.automationCmd,
+		"mcp_servers.codex_tg_automations.args":                       []string{"automation-mcp"},
+		"mcp_servers.codex_tg_automations.env.CTR_GO_AUTOMATIONS_DIR": c.automationsDir,
+		"mcp_servers.codex_tg_automations.startup_timeout_sec":        10,
+		"mcp_servers.codex_tg_automations.tool_timeout_sec":           30,
+	}
 }
 
 func (c *Client) TurnInterrupt(ctx context.Context, threadID, turnID string) error {

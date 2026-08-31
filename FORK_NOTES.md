@@ -38,6 +38,9 @@ respective owners.
   private temporary-file cleanup.
 - Uses independent Desktop and Telegram sessions while allowing an explicitly
   linked capability layer and a separate user-approved durable-memory store.
+- Adds an opt-in native Scheduled tasks bridge for standalone cron definitions,
+  while keeping Codex Desktop as the only scheduler and preserving isolated
+  Telegram/Desktop thread state.
 - Adds ADRs, feature briefs, contract documentation, and regression tests for
   the new routing, lifecycle, navigation, rendering, and compatibility rules.
 

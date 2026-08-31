@@ -55,6 +55,8 @@ This file now serves two purposes:
   interactively or receive all important values through flags.
 - macOS service lifecycle commands are `ctr-go service start|stop|restart|status|enable-login|disable-login|uninstall`.
 - `CTR_GO_CONFIG` points at an alternate config file.
+- `CTR_GO_AUTOMATIONS_DIR` explicitly enables the Codex Desktop Scheduled task
+  definition bridge; existing configs without it stay disabled.
 - Config precedence is explicit environment variables, then config file values, then built-in defaults.
 - Config files use simple `.env` style `KEY=VALUE` entries; comments and quoted values are supported, but shell expansion is not.
 - Runtime proxy env can be stored in the private config and applied after
@@ -97,6 +99,20 @@ Skills and ecosystem:
 - read plugin skill metadata when supported
 - inspect MCP server status, app list, hooks list, and config state when supported
 - prefer Codex-native Skills, Hooks, and Automations over duplicate custom formats
+
+Scheduled tasks:
+
+- new and resumed Telegram threads receive a private stdio
+  `automation_update` MCP tool only when `CTR_GO_AUTOMATIONS_DIR` is configured
+- the tool reads and writes native Codex automation definitions; it does not
+  introduce a second task format or scheduler
+- Telegram-created schedules are standalone local `cron` tasks; `heartbeat`
+  is rejected because Telegram thread ids are not Desktop thread ids
+- Codex Desktop owns schedule execution, run history, UI, and notifications and
+  must be running for local tasks
+- Scheduled run output is not synthesized as a Telegram runtime turn
+- task ids and paths are validated, unknown native TOML fields survive updates,
+  and automation prompts must not contain credentials
 
 Notifications:
 

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mideco-tech/codex-tg/internal/automation"
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/telegram"
@@ -55,6 +56,12 @@ func runWithIO(args []string, in io.Reader, out io.Writer) error {
 			return err
 		}
 		return runDaemon(cfg)
+	case "automation-mcp":
+		root := strings.TrimSpace(os.Getenv("CTR_GO_AUTOMATIONS_DIR"))
+		if root == "" {
+			return errors.New("CTR_GO_AUTOMATIONS_DIR must be set")
+		}
+		return automation.ServeMCP(in, out, automation.NewStore(root, time.Now))
 	case "status":
 		cfg, err := config.Load()
 		if err != nil {
@@ -154,6 +161,7 @@ func runStatus(cfg config.Config, out io.Writer) error {
 		fmt.Sprintf("DB: %s", cfg.Paths.DBPath),
 		fmt.Sprintf("Codex bin: %s", cfg.CodexBin),
 		fmt.Sprintf("Codex home: %s", formatOptionalValue(cfg.CodexHome, "inherited")),
+		fmt.Sprintf("Scheduled tasks: %s", formatOptionalValue(cfg.AutomationsDir, "disabled")),
 		fmt.Sprintf("Telegram configured: %t", strings.TrimSpace(cfg.TelegramBotToken) != ""),
 		fmt.Sprintf("Allowed users: %s", formatIDs(cfg.AllowedUserIDs)),
 		fmt.Sprintf("Allowed chats: %s", formatIDs(cfg.AllowedChatIDs)),
@@ -279,6 +287,10 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	automationsDir, err := prompt(reader, out, "Codex Desktop Scheduled tasks directory", config.DefaultAutomationsDir())
+	if err != nil {
+		return err
+	}
 	selectedCodexBin, err := prompt(reader, out, "Codex binary", codexBin)
 	if err != nil {
 		return err
@@ -295,6 +307,7 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 		"CTR_GO_CODEX_CHATS_ROOT":   chatsRoot,
 		"CTR_GO_CODEX_BIN":          selectedCodexBin,
 		"CTR_GO_CODEX_HOME":         codexHome,
+		"CTR_GO_AUTOMATIONS_DIR":    automationsDir,
 		"CTR_GO_NOTIFY_NEW_RUN":     notifyNewRun,
 	}
 	if strings.TrimSpace(allowedChats) != "" {
