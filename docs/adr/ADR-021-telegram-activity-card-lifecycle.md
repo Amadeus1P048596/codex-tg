@@ -21,16 +21,20 @@ derive user-facing activities without exposing each transport event.
 ## Decision
 
 - A Codex turn owns one summary message whenever possible.
+- In `per_run` mode, a changed App Server turn id always owns a new summary
+  message, even when the previous panel still carries a stale non-terminal
+  status. The four-second typing delay must not make the new turn inherit or
+  edit an earlier turn's Telegram message.
 - For the first four seconds, Telegram shows only `typing`. A surviving turn
   creates a Working card; a fast turn creates one terminal card.
 - All non-terminal updates edit the summary message and are throttled to a
   four-second minimum interval.
-- Terminal and input-required transitions bypass the throttle and edit the same
-  card. Finalization does not delete and replace it.
-- Telegram does not notify on message edits. A short foreground terminal
-  transition therefore emits one de-duplicated compact audible notice after
-  editing the stable card. A fast terminal card or separately sent long result
-  is already audible and does not receive an extra compact notice.
+- Input-required transitions bypass the throttle and edit the same card.
+- A foreground terminal transition sends its result as a new normally notifying
+  card, persists that message as the panel summary, then deletes the old Working
+  card best-effort. A failed send preserves the Working card for retry.
+- No additional compact `Completed` notice is sent; the new result card is the
+  single terminal surface and notification.
 - The leading emoji remains the stable conversation identity. State is conveyed
   with the words Working, Needs input, Completed, Failed, or Cancelled.
 - The thread/task title is the primary first row. `Codex · State · duration` is
@@ -42,9 +46,15 @@ derive user-facing activities without exposing each transport event.
   be shown when it helps technical users understand an important operation.
 - Raw tool/output evidence stays available through explicit Details and export
   actions, not the default card.
+- A running card renders only Stop, Steer, and Switch thread. A completed card
+  renders only Details and Switch thread. The picker opens as a separate
+  navigation response and does not replace the source activity card.
 - Short task/run ids are bottom metadata. Full ids are opt-in diagnostics.
-- Long final answers complete the original card with a compact summary and may
-  be delivered as separate rendered Result messages.
+- Multi-paragraph final answers that fit the activity-card budget render the
+  complete answer only in the expandable block. The opening paragraph is not
+  repeated outside that block.
+- Long final answers use the new terminal card for their compact summary and
+  single notification, then may continue in silent rendered Result messages.
 - Successful images produced by the terminal turn are sent after its card or
   compact background notice as silent Telegram photo companions. Durable
   per-target/thread/turn/image fingerprints prevent poll or restart duplicates;
@@ -54,14 +64,23 @@ derive user-facing activities without exposing each transport event.
   image paths are authoritative for generated-artifact locations outside it.
 - Telegram photos are converted to App Server `localImage` inputs and enter the
   same single-card lifecycle; no media receipt card is added.
+- Telegram photo albums are buffered by chat, topic, sender, and
+  `media_group_id` until a one-second quiet window elapses. The caption from any
+  member and every member's largest photo variant are then dispatched together
+  as one App Server input, in Telegram message order.
 - Each Telegram chat/topic has one foreground thread. Only that thread may show
   a live Working/Activity card. Other threads suppress progress cards and emit
   at most one compact terminal or needs-input notice with a switch action.
 - Switching foreground threads removes the previous non-terminal card and
-  renders the selected thread's current card, preserving one stable focus.
+  renders the selected thread's current card, preserving one stable focus. If
+  the previous foreground thread was already terminal, switching records that
+  terminal fingerprint as acknowledged before observer polling can reinterpret
+  it as a new background completion; genuinely running work still notifies when
+  it later reaches a terminal state.
 - `/threads` lists only threads returned by the current Telegram App Server
-  runtime. Cached threads missing from that runtime are not selectable, and
-  thread titles are the inline buttons rather than numbered `Open` actions.
+  runtime. Cached threads missing from that runtime are not selectable, thread
+  titles are the inline buttons rather than numbered `Open` actions, and
+  cursor-backed five-item pages expose older sessions.
 - Interactive `/newchat` and `/newthread` flows collect an explicit title before
   the first prompt and write it through to App Server. After the plain-text title,
   that first prompt may contain Telegram `localImage` inputs. Legacy one-line
@@ -102,5 +121,5 @@ derive user-facing activities without exposing each transport event.
 - Removing tool observability or full-log exports.
 - Streaming every model token into Telegram.
 - Rendering full UUIDs in normal cards.
-- Supporting Telegram media groups, using a photo as the pending title, or
-  attaching media to the one-line command forms in this slice.
+- Using a photo as the pending title or attaching media to the one-line command
+  forms in this slice.

@@ -21,7 +21,7 @@ var (
 	automationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`)
 	tomlAssignment      = regexp.MustCompile(`^\s*([A-Za-z0-9_-]+)\s*=\s*(.*?)\s*$`)
 	allowedRRuleKeys    = map[string]struct{}{
-		"FREQ": {}, "INTERVAL": {}, "BYDAY": {}, "BYHOUR": {}, "BYMINUTE": {},
+		"FREQ": {}, "INTERVAL": {}, "BYDAY": {}, "BYMONTHDAY": {}, "BYHOUR": {}, "BYMINUTE": {},
 	}
 	allowedWeekdays = map[string]struct{}{
 		"MO": {}, "TU": {}, "WE": {}, "TH": {}, "FR": {}, "SA": {}, "SU": {},
@@ -226,8 +226,6 @@ func (s *Store) update(args map[string]any) (map[string]any, error) {
 		"rrule":                "rrule",
 		"status":               "status",
 		"cwd":                  "cwd",
-		"model":                "model",
-		"reasoningEffort":      "reasoning_effort",
 		"executionEnvironment": "execution_environment",
 	}
 	for argName, fileName := range updates {
@@ -392,16 +390,8 @@ func validatedCreateFields(args map[string]any) (map[string]any, error) {
 	if _, exists := args["projectId"]; !exists {
 		return nil, errors.New("projectId is required; use null for a projectless task")
 	}
-	for _, key := range []string{"model", "reasoningEffort"} {
-		value, ok := optionalStringArg(args, key)
-		if !ok || value == "" {
-			return nil, fmt.Errorf("%s is required", key)
-		}
-	}
 	for _, pair := range [][2]string{
 		{"cwd", "cwd"},
-		{"model", "model"},
-		{"reasoningEffort", "reasoning_effort"},
 		{"executionEnvironment", "execution_environment"},
 		{"projectId", "project_id"},
 		{"notificationPolicy", "notification_policy"},
@@ -445,7 +435,7 @@ func validateField(name, value string) error {
 		if value != "failed_runs_only" {
 			return errors.New("notificationPolicy must be failed_runs_only or null")
 		}
-	case "model", "reasoning_effort", "project_id", "cwd":
+	case "project_id", "cwd":
 		if value == "" {
 			return fmt.Errorf("%s cannot be empty", name)
 		}
@@ -475,8 +465,8 @@ func validateRRule(value string) error {
 		seen[key] = raw
 	}
 	freq := seen["FREQ"]
-	if freq != "HOURLY" && freq != "DAILY" && freq != "WEEKLY" {
-		return errors.New("cron rrule FREQ must be HOURLY, DAILY, or WEEKLY")
+	if freq != "HOURLY" && freq != "DAILY" && freq != "WEEKLY" && freq != "MONTHLY" {
+		return errors.New("cron rrule FREQ must be HOURLY, DAILY, WEEKLY, or MONTHLY")
 	}
 	if raw := seen["INTERVAL"]; raw != "" {
 		interval, err := strconv.Atoi(raw)
@@ -485,9 +475,23 @@ func validateRRule(value string) error {
 		}
 	}
 	if raw := seen["BYDAY"]; raw != "" {
+		if freq == "MONTHLY" {
+			return errors.New("monthly rrule does not support BYDAY; use BYMONTHDAY")
+		}
 		for _, day := range strings.Split(raw, ",") {
 			if _, ok := allowedWeekdays[day]; !ok {
 				return fmt.Errorf("rrule BYDAY contains invalid weekday %q", day)
+			}
+		}
+	}
+	if raw := seen["BYMONTHDAY"]; raw != "" {
+		if freq != "MONTHLY" {
+			return errors.New("rrule BYMONTHDAY requires FREQ=MONTHLY")
+		}
+		for _, day := range strings.Split(raw, ",") {
+			value, err := strconv.Atoi(day)
+			if err != nil || value < 1 || value > 31 {
+				return errors.New("rrule BYMONTHDAY must contain integers from 1 to 31")
 			}
 		}
 	}

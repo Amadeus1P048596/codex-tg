@@ -154,7 +154,36 @@ func TestStartOpensTheSessionHome(t *testing.T) {
 	}
 }
 
-func TestHomeNewSessionChooserArmsTitleThenPromptInPlace(t *testing.T) {
+func TestCompactNavigationAliasesMatchLongCommands(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	for _, test := range []struct {
+		compact string
+		legacy  string
+	}{
+		{compact: "/h", legacy: "/home"},
+		{compact: "/t", legacy: "/threads"},
+		{compact: "/c", legacy: "/current"},
+		{compact: "/a", legacy: "/archive"},
+		{compact: "/un", legacy: "/unarchive"},
+	} {
+		compact, err := service.handleCommand(ctx, 123456789, 0, test.compact, 0)
+		if err != nil {
+			t.Fatalf("handleCommand(%s) failed: %v", test.compact, err)
+		}
+		legacy, err := service.handleCommand(ctx, 123456789, 0, test.legacy, 0)
+		if err != nil {
+			t.Fatalf("handleCommand(%s) failed: %v", test.legacy, err)
+		}
+		if compact == nil || legacy == nil || compact.Text != legacy.Text || buttonTexts(compact.Buttons) != buttonTexts(legacy.Buttons) {
+			t.Fatalf("%s response = %#v, want same navigation surface as %s = %#v", test.compact, compact, test.legacy, legacy)
+		}
+	}
+}
+
+func TestHomeNewSessionActionArmsChatTitleInPlace(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -167,26 +196,16 @@ func TestHomeNewSessionChooserArmsTitleThenPromptInPlace(t *testing.T) {
 	}
 	newMenuToken := callbackTokenForButton(home.Buttons, "新建会话")
 	if newMenuToken == "" {
-		t.Fatalf("home buttons = %#v, want new-session chooser", home.Buttons)
+		t.Fatalf("home buttons = %#v, want new-session action", home.Buttons)
 	}
 	if _, err := service.HandleCallback(ctx, 123456789, 0, 77, 123456789, newMenuToken); err != nil {
 		t.Fatalf("HandleCallback(home_new_menu) failed: %v", err)
 	}
-	if len(sender.edits) != 1 || sender.edits[0].messageID != 77 {
-		t.Fatalf("chooser edits = %#v, want in-place edit", sender.edits)
-	}
-	newThreadToken := callbackTokenForButton(sender.edits[0].buttons, "新建普通会话")
-	if newThreadToken == "" {
-		t.Fatalf("chooser buttons = %#v", sender.edits[0].buttons)
-	}
-	if _, err := service.HandleCallback(ctx, 123456789, 0, 77, 123456789, newThreadToken); err != nil {
-		t.Fatalf("HandleCallback(home_new_thread) failed: %v", err)
-	}
-	if len(sender.edits) != 2 || sender.edits[1].messageID != 77 || !strings.Contains(sender.edits[1].text, "请输入新会话的标题") {
+	if len(sender.edits) != 1 || sender.edits[0].messageID != 77 || !strings.Contains(sender.edits[0].text, "请输入新 Chat 的标题") {
 		t.Fatalf("title edits = %#v, want in-place title prompt", sender.edits)
 	}
 	state, ok, expired, err := service.pendingNewThreadState(ctx, 123456789, 0)
-	if err != nil || !ok || expired || state.Kind != pendingNewThreadKindWithoutCWD || state.Stage != pendingNewThreadStageTitle {
+	if err != nil || !ok || expired || state.Kind != pendingNewThreadKindChat || state.Stage != pendingNewThreadStageTitle {
 		t.Fatalf("pending state = %#v ok=%t expired=%t err=%v", state, ok, expired, err)
 	}
 }

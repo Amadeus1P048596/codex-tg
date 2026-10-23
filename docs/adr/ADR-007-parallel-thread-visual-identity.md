@@ -16,7 +16,9 @@
 - Emoji markers are visual hints only. Routing correctness depends on persisted message routes and callback route tokens, not rendered text.
 - Short `T:` and `R:` chips are copy hints only. They are not route authority and are not sufficient for explicit commands that need the full Codex id.
 - `/context` must show the full bound `Thread ID` when a thread is available.
-- Live summary and Final Card actions expose `Get thread id`, which sends a separate copyable message with full `Thread ID` and `Turn ID`.
+- Full-id buttons are omitted from the compact activity-card surface. `/context`
+  remains the explicit route for copyable full thread identity; already-sent
+  legacy callbacks remain valid.
 - Marker assignment is deterministic by `threadId`, but the runtime avoids active marker collisions while palette slots are available.
 - Marker assignments remain reserved for 30 minutes after the last render, reducing confusing reuse in nearby chat history.
 - When active threads exceed the palette, the runtime may reuse a base emoji with suffixes such as `#2`.
@@ -30,7 +32,8 @@
 - Tests must assert identity presence by message kind and route metadata, not exact string prefixes like `[Final]`.
 - Tests must assert Telegram entity ranges for the emphasized thread title,
   role, status, timing, and secondary metadata.
-- Tests must cover full-id access through `/context`, live summary cards, and Final Cards.
+- Tests must cover full-id access through `/context` and the absence of diagnostic
+  full-id buttons from compact activity cards.
 - Live Telegram e2e for UI changes must include at least two parallel Codex threads, so marker/chip separation is verified in the real chat.
 
 ## Non-goals

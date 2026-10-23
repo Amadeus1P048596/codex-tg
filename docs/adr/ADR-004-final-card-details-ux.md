@@ -14,6 +14,9 @@
 - Full tool and output content is also available as a `.txt` file when message-sized rendering is not practical.
 - Deletion of old live commentary/tool/output messages after finalization is best-effort.
 - Details callbacks are bound to the completed run panel/card that created them. Missing, stale, or mismatched panel metadata must fail closed instead of falling back to the current panel for the thread.
+- The normal completed-card action surface contains only `Details` and
+  `Switch thread`. Full-log, writer-management, refresh, context, and full-id
+  diagnostics are not rendered as Final Card buttons.
 
 ## Consequences
 

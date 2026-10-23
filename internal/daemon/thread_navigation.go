@@ -268,19 +268,6 @@ func (s *Service) inboxOverview(ctx context.Context, chatID, topicID int64) (*Di
 	return &DirectResponse{Text: fmt.Sprintf("待处理 · %d\n\n点击会话切换并查看详情。", len(items)), Buttons: buttons}, nil
 }
 
-func (s *Service) newSessionMenu(ctx context.Context) *DirectResponse {
-	return &DirectResponse{
-		Text: "新建会话\n\n请选择会话类型。",
-		Buttons: [][]model.ButtonSpec{
-			{
-				s.callbackButton(ctx, "新建 Chat", "home_new_chat", "", "", "", nil),
-				s.callbackButton(ctx, "新建普通会话", "home_new_thread", "", "", "", nil),
-			},
-			{s.callbackButton(ctx, "返回首页", "home_overview", "", "", "", nil)},
-		},
-	}
-}
-
 func (s *Service) editNavigationResponse(ctx context.Context, chatID, topicID, messageID int64, response *DirectResponse, callbackText string) (*DirectResponse, error) {
 	if response == nil {
 		return &DirectResponse{CallbackText: callbackText}, nil

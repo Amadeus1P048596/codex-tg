@@ -28,8 +28,8 @@ activities. Non-terminal edits are limited to one every four seconds. Fast
 reads, searches, and status checks usually affect only the operation count.
 
 Raw `[Tool]`, `[Output]`, `Last completed tool`, and empty-output messages are
-not part of the normal chronology. Details and export actions retain the raw
-evidence for diagnostics.
+not part of the normal chronology. Details and its Tools file retain the raw
+evidence needed for ordinary diagnostics.
 
 ## Final Card
 
@@ -37,12 +37,18 @@ The Working card is edited in place to its terminal state. It is not deleted and
 replaced with a new Final message. Fast turns that finish before the four-second
 grace period produce only one terminal card.
 
-Short final answers appear directly on that card and add one compact audible
-completion notice because Telegram does not notify for message edits. Long answers first complete
-the original card with a compact summary, then continue in one or more
-`Codex · 结果` messages. Completed commentary and tool/output history remain
-available through Details, Tools file, and full-log actions. Details/Back stay
+Multi-paragraph final answers that fit the card show a compact first-paragraph
+summary outside and the complete answer inside the expandable block. A short
+foreground completion adds one compact audible notice because Telegram does not
+notify for message edits. Longer answers first complete the original card with
+a compact summary, then continue in one or more `Codex · 结果` messages.
+Completed commentary and tool/output history remain
+available through Details and Tools file. Details/Back stay
 bound to the completed card and turn that created them.
+
+Running cards expose only `停止`, `追加指令`, and `切换会话`. Completed cards
+expose only `详情` and `切换会话`. The thread picker is sent separately instead
+of replacing the activity card that opened it.
 
 ## Notifications
 
@@ -76,17 +82,23 @@ refresh continuously. When a background session completes, fails, is cancelled,
 or needs input, Telegram sends one compact notice with a `切换至该会话` button.
 
 Switching removes the previous foreground Working card, makes the selected
-session the foreground and bound session, and shows its current card. This keeps
-concurrent work observable without making several progress cards jump around.
+session the foreground and bound session, and shows its current card. A terminal
+state already shown while that session was foreground is acknowledged at the
+switch boundary, so the next observer poll does not replay it as a new background
+completion or inbox item. A session that was still running when switched away
+continues to produce one real background completion when it later finishes.
+This keeps concurrent work observable without making several progress cards
+jump around.
 
-`/threads` is an authoritative picker for the current Telegram App Server
-runtime. It shows one clickable title button per available session and no
-numbered `Open 1`, `Open 2`, or cached debug description rows. A placeholder
+`/t` (with `/threads` kept as a compatibility alias) is an authoritative picker for the current Telegram App Server
+runtime. It shows up to five clickable session-title buttons per page, plus
+cursor-backed previous/next navigation when more runtime sessions exist. It has
+no numbered `Open 1`, `Open 2`, or cached debug description rows. A placeholder
 App Server title falls back to the session's latest prompt preview. Cached
 Desktop sessions that are absent from the isolated Telegram runtime are not
 shown and cannot be opened as stale Completed cards.
 
-`/current` shows the foreground session marker, title, Chinese status, and short
+`/c` (with `/current` kept as a compatibility alias) shows the foreground session marker, title, Chinese status, and short
 task id. `/title <new title>` renames that current App Server thread, records the
 title as user-owned, and edits its existing Activity Card in place. Runtime
 refreshes cannot overwrite a user-owned title. Interactive `/newchat` and
@@ -96,12 +108,12 @@ whenever App Server still returns a UUID or generic placeholder; a later real
 App Server title replaces only that automatic fallback. Creating or binding a
 session also makes it the foreground session.
 
-`/archive` targets only the current foreground session. Running and input-blocked
+`/a` (with `/archive` kept as a compatibility alias) targets only the current foreground session. Running and input-blocked
 sessions are rejected before confirmation. An idle session shows inline
 `确认归档` / `取消`; success lands on `切换其他会话` and `新建会话` instead of a
 dead end. `/cancel` remains the immediate
 cancel action for pending `/newchat` and `/newthread` creation and has no archive
-confirmation behavior. `/unarchive` lists the current Telegram runtime's real
+confirmation behavior. `/un` (with `/unarchive` kept as a compatibility alias) lists the current Telegram runtime's real
 archived threads ten per page; each title is a restore button, with inline
 previous/next navigation. Restore success offers both `切换至该会话` and
 `继续查看归档`.
@@ -128,9 +140,12 @@ after accepting the RPC. Scheduled cleanup removes it afterward; startup and
 later downloads also remove matching files older than 24 hours. No separate
 media-receipt card is created.
 
-Media groups, image titles, and media attached to one-line `/newchat <prompt>`
-or `/newthread <prompt>` command forms are not covered by this implementation
-slice.
+For a Telegram album, the bot groups photo updates with the same
+`media_group_id` for a one-second quiet window. It preserves Telegram message
+order, takes the caption and reply route from the group, and sends all images to
+App Server in one input rather than starting a turn and steering later photos.
+Image titles and media attached to one-line `/newchat <prompt>` or `/newthread
+<prompt>` command forms are not covered by this implementation slice.
 
 ## Photo Output
 
@@ -188,24 +203,27 @@ The main `/projects` view shows recent project workspaces and the latest Chat
 previews; `Open Chats` opens the full paginated Chat list. Selecting a Chat
 opens and binds that single thread.
 
-New Chat starts can use `/newchat` followed by a title and then a separate first
+New Chat starts use `/new` followed by a title and then a separate first
 prompt. The bot keeps the pending stage and title for the current chat/topic for
 15 minutes and offers `/cancel`. The bridge creates a dated Chat folder from the
 title under the configured Chats root, passes that cwd to App Server
 `thread/start`, writes the title through, and starts the first turn using only
-the prompt. `/newthread` uses the same title-then-prompt interaction without
-project selection or Chat folder creation. The one-line `/newchat <prompt>` and
-`/newthread <prompt>` forms remain supported. App Server may still report the
-daemon default cwd for a `/newthread` thread.
+the prompt. `/new <prompt>` is the one-line form. `/newchat` and `/newthread`
+remain routeable for compatibility but are hidden from the compact command
+menu. Project-scoped creation remains under `/projects`.
 
 The Telegram bot does not accept arbitrary filesystem paths for this flow.
 Creating or editing project work directories is a separate future feature.
 
 ## Codex Settings
 
-`/settings`, `/model`, and `/effort` expose Telegram button menus for model selection and reasoning effort used by Telegram-started collaboration-mode turns. The selections are stored in SQLite daemon state and are not configured through public env vars.
+`/m` reports the shared model and reasoning effort without opening a menu. `/sm` is the compact editor: choose a model first, then choose from the reasoning efforts supported by that model. The same Telegram message is edited between the two steps.
 
-After a model or reasoning-effort selection, the menu message is edited into a compact settings summary without inline choice buttons. Use `/settings`, `/model`, or `/effort` to reopen the menus.
+`/speed` opens a separate two-choice menu. `normal` uses the standard App Server service tier and `fast` requests the faster tier at higher Codex credit consumption.
+
+The model, reasoning, and speed settings are used by every future Telegram conversation turn and scheduled run. Existing conversations pick up changes on their next turn; a turn already in progress is not interrupted. The selections are stored in SQLite daemon state and are not configured through public env vars.
+
+After the final selection, the menu message is edited into a compact settings summary without inline choice buttons. `/settings`, `/model`, and `/effort` remain available as compatibility controls for the overview and standalone menus; `/settings` also links to the speed menu.
 
 ## Independent Sessions, Shared Capabilities And Memory
 
@@ -224,9 +242,9 @@ poll App Server. `/bind` and `在 TG 中继续` load the thread in the live App 
 An unexpected writer conflict from another connection in that isolated runtime is
 reported without queuing the user's message or creating a parallel turn.
 
-While the live App Server owns the writer, summary and Final cards show
-`释放空闲写入权` instead of `在 TG 中继续`. After a Telegram-started turn is idle,
-use that button or `/release` to recycle the live session. Release applies to all
+After a Telegram-started turn is idle, `/release` can recycle the live session.
+Writer management is intentionally absent from normal activity-card actions.
+Release applies to all
 idle threads owned by that live generation and persists a marker so background
 refresh or restart does not immediately reacquire them. It refuses to run if any
 owned thread is still active, waiting for approval/input, or cannot be verified.
@@ -238,6 +256,7 @@ later safety check succeeds.
 ## Exports
 
 - `Tools file`: on-demand file for selected Details tool/output.
-- `Get full log`: on-demand archive from Codex session JSONL.
+- Full-log callback handling remains only for compatibility with already-sent
+  cards; new activity cards do not advertise it.
 
 Automatic tool-output document spam is intentionally forbidden.

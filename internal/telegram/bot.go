@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/config"
@@ -22,17 +24,40 @@ const (
 	telegramPhotoMaxSize   = int64(20 << 20)
 	telegramPhotoRetention = 30 * time.Minute
 	telegramPhotoStaleAge  = 24 * time.Hour
+	telegramMediaGroupWait = 1 * time.Second
 )
 
 var telegramBotTokenURLPattern = regexp.MustCompile(`bot[0-9]+:[A-Za-z0-9_-]+`)
 
+type telegramService interface {
+	HandleMessageWithLocalImages(context.Context, int64, int64, int64, string, []string, int64) (*daemon.DirectResponse, error)
+	HandleCallback(context.Context, int64, int64, int64, int64, string) (*daemon.DirectResponse, error)
+	RegisterDirectDelivery(context.Context, int64, int64, int64, *daemon.DirectResponse) error
+}
+
+type mediaGroupKey struct {
+	chatID  int64
+	topicID int64
+	userID  int64
+	groupID string
+}
+
+type pendingMediaGroup struct {
+	generation uint64
+	messages   []Message
+	messageIDs map[int64]struct{}
+}
+
 type Bot struct {
-	cfg                  config.Config
-	client               *Client
-	service              *daemon.Service
-	logger               *log.Logger
-	me                   *User
-	schedulePhotoCleanup func([]string, time.Duration)
+	cfg                     config.Config
+	client                  *Client
+	service                 telegramService
+	logger                  *log.Logger
+	me                      *User
+	schedulePhotoCleanup    func([]string, time.Duration)
+	scheduleMediaGroupFlush func(time.Duration, func())
+	mediaGroupsMu           sync.Mutex
+	mediaGroups             map[mediaGroupKey]*pendingMediaGroup
 }
 
 type Document struct {
@@ -84,6 +109,7 @@ func (b *Bot) cleanupStaleTelegramPhotoInputs() {
 }
 
 func (b *Bot) Run(ctx context.Context) error {
+	defer b.clearPendingMediaGroups()
 	var offset int64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -154,6 +180,9 @@ func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, m
 		message, err := b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup, options)
 		cancel()
 		if err != nil {
+			if !isTelegramEntityError(err) {
+				return nil, err
+			}
 			rendered = plainRenderedFallback(rendered)
 			sendCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
 			message, err = b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup, options)
@@ -167,6 +196,16 @@ func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, m
 		}
 	}
 	return ids, nil
+}
+
+func isTelegramEntityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "telegram sendmessage") &&
+		strings.Contains(message, "400") &&
+		strings.Contains(message, "entit")
 }
 
 func (b *Bot) EditMessage(ctx context.Context, chatID, topicID, messageID int64, text string, buttons [][]model.ButtonSpec) error {
@@ -284,17 +323,43 @@ func (b *Bot) handleMessage(ctx context.Context, message Message) error {
 	if message.From == nil {
 		return nil
 	}
-	text := strings.TrimSpace(firstNonEmptyTelegram(message.Text, message.Caption))
-	if text == "" && len(message.Photo) == 0 {
+	if strings.TrimSpace(message.MediaGroupID) != "" && len(message.Photo) > 0 {
+		b.enqueueMediaGroup(ctx, message)
 		return nil
 	}
-	replyTo := int64(0)
-	if message.ReplyToMessage != nil {
-		replyTo = message.ReplyToMessage.MessageID
+	return b.handleMessages(ctx, []Message{message})
+}
+
+func (b *Bot) handleMessages(ctx context.Context, messages []Message) error {
+	if len(messages) == 0 || messages[0].From == nil {
+		return nil
 	}
-	localImages, err := b.downloadMessagePhotos(ctx, message.Photo)
-	if err != nil {
-		return b.sendFailureMessage(ctx, message.Chat.ID, message.MessageThreadID, err)
+	sort.SliceStable(messages, func(i, j int) bool {
+		if messages[i].MessageID == 0 || messages[j].MessageID == 0 {
+			return false
+		}
+		return messages[i].MessageID < messages[j].MessageID
+	})
+	message := messages[0]
+	text := ""
+	replyTo := int64(0)
+	localImages := make([]string, 0, len(messages))
+	for _, item := range messages {
+		if text == "" {
+			text = strings.TrimSpace(firstNonEmptyTelegram(item.Text, item.Caption))
+		}
+		if replyTo == 0 && item.ReplyToMessage != nil {
+			replyTo = item.ReplyToMessage.MessageID
+		}
+		downloaded, err := b.downloadMessagePhotos(ctx, item.Photo)
+		if err != nil {
+			removeTelegramTempFiles(localImages)
+			return b.sendFailureMessage(ctx, message.Chat.ID, message.MessageThreadID, err)
+		}
+		localImages = append(localImages, downloaded...)
+	}
+	if text == "" && len(message.Photo) == 0 {
+		return nil
 	}
 	response, err := b.service.HandleMessageWithLocalImages(ctx, message.Chat.ID, message.MessageThreadID, message.From.ID, text, localImages, replyTo)
 	if err != nil {
@@ -303,6 +368,71 @@ func (b *Bot) handleMessage(ctx context.Context, message Message) error {
 	}
 	b.retainTelegramTempFiles(localImages)
 	return b.deliverDirectResponse(ctx, message.Chat.ID, message.MessageThreadID, response)
+}
+
+func (b *Bot) enqueueMediaGroup(ctx context.Context, message Message) {
+	key := mediaGroupKey{
+		chatID: message.Chat.ID, topicID: message.MessageThreadID,
+		userID: message.From.ID, groupID: strings.TrimSpace(message.MediaGroupID),
+	}
+	b.mediaGroupsMu.Lock()
+	if b.mediaGroups == nil {
+		b.mediaGroups = make(map[mediaGroupKey]*pendingMediaGroup)
+	}
+	group := b.mediaGroups[key]
+	if group == nil {
+		group = &pendingMediaGroup{messageIDs: make(map[int64]struct{})}
+		b.mediaGroups[key] = group
+	}
+	if message.MessageID != 0 {
+		if _, exists := group.messageIDs[message.MessageID]; exists {
+			b.mediaGroupsMu.Unlock()
+			return
+		}
+		group.messageIDs[message.MessageID] = struct{}{}
+	}
+	group.messages = append(group.messages, message)
+	group.generation++
+	generation := group.generation
+	b.mediaGroupsMu.Unlock()
+
+	flush := func() {
+		if err := b.flushMediaGroup(ctx, key, generation); err != nil && b.logger != nil {
+			b.logger.Printf("telegram media group %s failed: %s", mediaGroupLogID(key.groupID), sanitizeTelegramLogError(err))
+		}
+	}
+	if b.scheduleMediaGroupFlush != nil {
+		b.scheduleMediaGroupFlush(telegramMediaGroupWait, flush)
+		return
+	}
+	time.AfterFunc(telegramMediaGroupWait, flush)
+}
+
+func (b *Bot) flushMediaGroup(ctx context.Context, key mediaGroupKey, generation uint64) error {
+	b.mediaGroupsMu.Lock()
+	group := b.mediaGroups[key]
+	if group == nil || group.generation != generation {
+		b.mediaGroupsMu.Unlock()
+		return nil
+	}
+	delete(b.mediaGroups, key)
+	messages := append([]Message(nil), group.messages...)
+	b.mediaGroupsMu.Unlock()
+	return b.handleMessages(ctx, messages)
+}
+
+func (b *Bot) clearPendingMediaGroups() {
+	b.mediaGroupsMu.Lock()
+	b.mediaGroups = nil
+	b.mediaGroupsMu.Unlock()
+}
+
+func mediaGroupLogID(groupID string) string {
+	groupID = strings.TrimSpace(groupID)
+	if len(groupID) <= 8 {
+		return groupID
+	}
+	return groupID[len(groupID)-8:]
 }
 
 func (b *Bot) downloadMessagePhotos(ctx context.Context, photos []PhotoSize) ([]string, error) {
@@ -498,23 +628,25 @@ func (b *Bot) sendFailureMessage(ctx context.Context, chatID, topicID int64, cau
 func defaultCommands() []BotCommand {
 	return []BotCommand{
 		{Command: "start", Description: "查看连接状态和快捷帮助"},
-		{Command: "home", Description: "打开会话首页"},
+		{Command: "h", Description: "打开会话首页"},
+		{Command: "new", Description: "新建会话"},
+		{Command: "t", Description: "切换可用会话"},
 		{Command: "help", Description: "查看命令列表"},
 		{Command: "status", Description: "查看运行和连接状态"},
-		{Command: "current", Description: "确认当前会话"},
+		{Command: "c", Description: "确认当前会话"},
 		{Command: "inbox", Description: "查看后台待处理会话"},
-		{Command: "threads", Description: "切换可用会话"},
 		{Command: "projects", Description: "查看项目"},
-		{Command: "newchat", Description: "新建 Codex Chat"},
-		{Command: "newthread", Description: "新建普通会话"},
 		{Command: "cancel", Description: "取消待输入的新建请求"},
 		{Command: "title", Description: "修改当前会话标题"},
-		{Command: "archive", Description: "归档当前会话"},
-		{Command: "unarchive", Description: "恢复已归档会话"},
+		{Command: "a", Description: "归档当前会话"},
+		{Command: "un", Description: "恢复已归档会话"},
 		{Command: "show", Description: "显示会话卡片"},
 		{Command: "bind", Description: "在 TG 独立会话中继续"},
 		{Command: "reply", Description: "向会话发送内容"},
 		{Command: "plan", Description: "在会话中启动 Plan 模式"},
+		{Command: "m", Description: "查看模型与推理强度"},
+		{Command: "sm", Description: "切换模型与推理强度"},
+		{Command: "speed", Description: "切换 normal/fast 速度"},
 		{Command: "settings", Description: "查看 Codex 设置"},
 		{Command: "model", Description: "选择模型"},
 		{Command: "effort", Description: "选择推理强度"},

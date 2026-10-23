@@ -31,11 +31,20 @@ func TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce(t *testing.T) {
 	now := time.Date(2026, 8, 31, 9, 30, 5, 0, location)
 	service.now = func() time.Time { return now }
 	service.cfg.AutomationsDir = filepath.Join(service.cfg.Paths.Home, "automations")
+	if err := service.store.SetState(context.Background(), codexModelStateKey, "gpt-shared"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(context.Background(), codexReasoningStateKey, "high"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	if err := service.store.SetState(context.Background(), codexSpeedStateKey, "fast"); err != nil {
+		t.Fatalf("SetState(speed) failed: %v", err)
+	}
 	automationStore := automation.NewStore(service.cfg.AutomationsDir, func() time.Time { return createdAt })
 	created, err := automationStore.Apply(map[string]any{
 		"mode": "create", "name": "Morning check", "prompt": "Check the project and report.",
 		"rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=30", "status": "ACTIVE", "kind": "cron",
-		"projectId": nil, "model": "gpt-scheduled", "reasoningEffort": "high", "executionEnvironment": "local",
+		"projectId": nil, "model": "gpt-legacy-task", "reasoningEffort": "low", "executionEnvironment": "local",
 	})
 	if err != nil {
 		t.Fatalf("create automation failed: %v", err)
@@ -57,8 +66,8 @@ func TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce(t *testing.T) {
 		t.Fatalf("turnStartCalls = %#v, want one scheduled turn", stub.turnStartCalls)
 	}
 	call := stub.turnStartCalls[0]
-	if call.threadID != "scheduled-thread" || call.message != "Check the project and report." || call.model != "gpt-scheduled" || call.reasoningEffort != "high" {
-		t.Fatalf("turn call = %#v, want prompt/model/reasoning from task", call)
+	if call.threadID != "scheduled-thread" || call.message != "Check the project and report." || call.model != "gpt-shared" || call.reasoningEffort != "high" || call.speed != "fast" {
+		t.Fatalf("turn call = %#v, want prompt plus shared model/reasoning/speed settings", call)
 	}
 	if binding, err := service.store.GetBinding(context.Background(), 123456789, 0); err != nil || binding != nil {
 		t.Fatalf("binding = %#v err=%v, scheduled run must stay in the background", binding, err)
@@ -66,6 +75,79 @@ func TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce(t *testing.T) {
 	raw, err := service.store.GetState(context.Background(), automationRunStateKey(taskID))
 	if err != nil || !strings.Contains(raw, `"status":"running"`) || !strings.Contains(raw, `"thread_id":"scheduled-thread"`) {
 		t.Fatalf("run state = %q err=%v, want durable running claim", raw, err)
+	}
+}
+
+func TestTurnStartOptionsUseSharedSettingsForExistingAndNewThreads(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-shared"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexReasoningStateKey, "high"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexSpeedStateKey, "fast"); err != nil {
+		t.Fatalf("SetState(speed) failed: %v", err)
+	}
+	existing := &model.Thread{ID: "existing-thread", PreferredModel: "gpt-thread-local"}
+
+	for name, options := range map[string]appserver.TurnStartOptions{
+		"existing": service.turnStartOptions(ctx, "", existing),
+		"new":      service.turnStartOptions(ctx, "", nil),
+	} {
+		if options.Model != "gpt-shared" || options.ReasoningEffort != "high" || options.Speed != "fast" {
+			t.Fatalf("%s options = %#v, want shared gpt-shared/high/fast", name, options)
+		}
+	}
+
+	if err := service.store.SetState(ctx, codexModelStateKey, ""); err != nil {
+		t.Fatalf("clear model failed: %v", err)
+	}
+	if got := service.turnStartOptions(ctx, "", existing).Model; got != "" {
+		t.Fatalf("Auto model = %q, want no per-thread fallback", got)
+	}
+}
+
+func TestSpeedMenuPersistsSelectedSpeed(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/speed", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/speed) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "normal") {
+		t.Fatalf("/speed response = %#v, want normal as current speed", response)
+	}
+	fastToken := callbackTokenForButton(response.Buttons, "fast")
+	if fastToken == "" || callbackTokenForButton(response.Buttons, "normal") == "" {
+		t.Fatalf("speed buttons = %#v, want normal and fast", response.Buttons)
+	}
+
+	saved, err := service.HandleCallback(ctx, 123456789, 0, 903, 123456789, fastToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(speed select) failed: %v", err)
+	}
+	if saved == nil || !strings.Contains(saved.Text, "fast") {
+		t.Fatalf("saved response = %#v, want fast settings summary", saved)
+	}
+	if len(saved.Buttons) != 0 {
+		t.Fatalf("saved buttons = %#v, want choice buttons removed after selection", saved.Buttons)
+	}
+	value, err := service.store.GetState(ctx, codexSpeedStateKey)
+	if err != nil {
+		t.Fatalf("GetState(speed) failed: %v", err)
+	}
+	if value != "fast" {
+		t.Fatalf("stored speed = %q, want fast", value)
+	}
+	if got := service.turnStartOptions(ctx, "", nil).Speed; got != "fast" {
+		t.Fatalf("turn speed = %q, want fast", got)
 	}
 }
 
@@ -625,7 +707,7 @@ func TestThreadsCommandUsesPreviewForPlaceholderTitleAndUnicodeSafeButtons(t *te
 
 	service := newTestService(t)
 	ctx := context.Background()
-	threadID := "01a03706-f6bb-7a33-a119-18f908e5d1ce"
+	threadID := "thread-preview-utf8"
 	preview := "排查 codex-tg 组件并确认一个非常非常长的中文会话标题不会在按钮裁剪时破坏 UTF-8 字符边界以及 Telegram 显示"
 	if err := service.store.UpsertThread(ctx, model.Thread{
 		ID:          threadID,
@@ -1245,7 +1327,7 @@ func TestProjectNewThreadTurnStartFailureSavesThread(t *testing.T) {
 	}
 }
 
-func TestNewChatCommandCreatesCodexUIChatCWDAndBinds(t *testing.T) {
+func TestNewCommandCreatesCodexUIChatCWDAndBinds(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -1278,9 +1360,9 @@ func TestNewChatCommandCreatesCodexUIChatCWDAndBinds(t *testing.T) {
 	service.live = stub
 	service.liveConnected = true
 
-	response, err := service.handleCommand(ctx, 123456789, 0, "/newchat Проверь tool call по погоде", 0)
+	response, err := service.handleCommand(ctx, 123456789, 0, "/new Проверь tool call по погоде", 0)
 	if err != nil {
-		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+		t.Fatalf("handleCommand(/new) failed: %v", err)
 	}
 	if response == nil || response.ThreadID != "new-chat-thread" || response.TurnID != "started-turn" {
 		t.Fatalf("response = %#v, want new chat thread/turn", response)
@@ -3276,7 +3358,7 @@ func TestBootstrapTrackedStateSkipsManuallyReleasedBoundThread(t *testing.T) {
 	}
 }
 
-func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
+func TestBindHereAcquiresWriterWithoutCardWriterButtons(t *testing.T) {
 	service := newTestService(t)
 	ctx := context.Background()
 	thread := model.Thread{ID: "bind-writer-thread", Title: "Bind writer", CWD: `C:\Users\you\Projects\Codex`, Status: "idle"}
@@ -3291,14 +3373,9 @@ func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
 	service.liveConnected = true
 	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-complete", LatestTurnStatus: "completed"}
 
-	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	bindToken := callbackTokenForButton(buttons, "在 TG 中继续")
-	if bindToken == "" {
-		t.Fatalf("Bind here button missing from %#v", buttons)
-	}
-	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, bindToken)
+	response, err := service.bindThreadForTelegram(ctx, 123456789, 0, thread.ID)
 	if err != nil {
-		t.Fatalf("HandleCallback(bind_here) failed: %v", err)
+		t.Fatalf("bindThreadForTelegram failed: %v", err)
 	}
 	if response == nil || !strings.Contains(response.CallbackText, "TG live App Server") {
 		t.Fatalf("response = %#v, want bind confirmation", response)
@@ -3313,15 +3390,12 @@ func TestBindHereAcquiresWriterAndShowsReleaseButton(t *testing.T) {
 		t.Fatal("Bind here did not clear the manual-release marker")
 	}
 	_, ownedButtons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	if callbackTokenForButton(ownedButtons, "释放空闲写入权") == "" {
-		t.Fatalf("Release TG lock button missing from %#v", ownedButtons)
-	}
-	if callbackTokenForButton(ownedButtons, "在 TG 中继续") != "" {
-		t.Fatalf("Bind here remained after TG acquired the writer: %#v", ownedButtons)
+	if callbackTokenForButton(ownedButtons, "释放空闲写入权") != "" || callbackTokenForButton(ownedButtons, "在 TG 中继续") != "" {
+		t.Fatalf("writer-management buttons must stay off the activity card: %#v", ownedButtons)
 	}
 	_, finalButtons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	if callbackTokenForButton(finalButtons, "释放空闲写入权") == "" {
-		t.Fatalf("Release TG lock button missing from Final card: %#v", finalButtons)
+	if callbackTokenForButton(finalButtons, "释放空闲写入权") != "" || callbackTokenForButton(finalButtons, "在 TG 中继续") != "" {
+		t.Fatalf("writer-management buttons must stay off the Final card: %#v", finalButtons)
 	}
 }
 
@@ -3336,11 +3410,8 @@ func TestObserverCopyDescribesTelegramRuntimeInsteadOfDesktopHandoff(t *testing.
 		t.Fatalf("run notice = %q, want isolated Telegram runtime source", notice)
 	}
 	event := service.renderObserverEvent(ctx, model.ObserverEvent{ThreadID: thread.ID, ThreadTitle: thread.Title, TurnID: snapshot.LatestTurnID})
-	if event == nil || callbackTokenForButton(event.Buttons, "在 TG 中继续") == "" {
-		t.Fatalf("observer event = %#v, want isolated-runtime continuation action", event)
-	}
-	if callbackTokenForButton(event.Buttons, "由 TG 接管") != "" {
-		t.Fatalf("observer event retained Desktop handoff wording: %#v", event.Buttons)
+	if event == nil || buttonTexts(event.Buttons) != "停止\n追加指令\n切换会话" {
+		t.Fatalf("observer event = %#v, want compact running actions", event)
 	}
 }
 
@@ -3387,11 +3458,7 @@ func TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession(t *testing.T
 	service.liveOwnedThreads = map[string]struct{}{thread.ID: {}}
 	service.liveFactory = func() Session { return newLive }
 	snapshot := &appserver.ThreadReadSnapshot{Thread: thread, LatestTurnID: "turn-complete", LatestTurnStatus: "completed"}
-	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	releaseToken := callbackTokenForButton(buttons, "释放空闲写入权")
-	if releaseToken == "" {
-		t.Fatalf("Release TG lock button missing from %#v", buttons)
-	}
+	releaseToken := service.callbackButton(ctx, "legacy release", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil).CallbackData
 
 	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, releaseToken)
 	if err != nil {
@@ -3410,8 +3477,8 @@ func TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession(t *testing.T
 		t.Fatalf("live session was not recycled: close=%d live=%p connected=%t", oldLive.closeCalls, service.live, service.liveConnected)
 	}
 	_, releasedButtons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	if callbackTokenForButton(releasedButtons, "在 TG 中继续") == "" {
-		t.Fatalf("Bind here button missing after release: %#v", releasedButtons)
+	if callbackTokenForButton(releasedButtons, "在 TG 中继续") != "" || callbackTokenForButton(releasedButtons, "释放空闲写入权") != "" {
+		t.Fatalf("writer-management buttons must stay hidden after release: %#v", releasedButtons)
 	}
 }
 
@@ -4981,102 +5048,201 @@ func TestContextCardBoundThreadIncludesFullThreadID(t *testing.T) {
 	}
 }
 
-func TestSummaryPanelGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
+func TestActivityCardButtonsUseCompactLayouts(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
 	ctx := context.Background()
 	thread := model.Thread{
-		ID:          "summary-thread-full-id",
-		Title:       "Summary",
+		ID:          "compact-actions-thread",
+		Title:       "Compact actions",
 		ProjectName: "Codex",
 		CWD:         "/Users/example/project",
 		Status:      "active",
 	}
-	snapshot := &appserver.ThreadReadSnapshot{
+	active := &appserver.ThreadReadSnapshot{
 		Thread:             thread,
-		LatestTurnID:       "summary-turn-full-id",
+		LatestTurnID:       "compact-actions-turn",
 		LatestTurnStatus:   "inProgress",
 		LatestProgressText: "Working",
 		LatestProgressFP:   "progress-fp",
 	}
 
-	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	token := callbackTokenForButton(buttons, "查看会话 ID")
-	if token == "" {
-		t.Fatalf("Get thread id button not found in %#v", buttons)
+	_, activeButtons, _ := service.renderSummaryPanel(ctx, thread, active, nil)
+	if got, want := buttonTexts(activeButtons), "停止\n追加指令\n切换会话"; got != want {
+		t.Fatalf("active card buttons = %q, want %q", got, want)
 	}
 
-	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
-	if err != nil {
-		t.Fatalf("HandleCallback(get_thread_id) failed: %v", err)
-	}
-	if response == nil || response.Text != "会话 ID：\nsummary-thread-full-id\n\n运行 ID：\nsummary-turn-full-id" {
-		t.Fatalf("response = %#v, want copyable thread/turn ids", response)
-	}
-	if response.ThreadID != thread.ID || response.TurnID != "summary-turn-full-id" {
-		t.Fatalf("response route = thread %q turn %q, want full ids", response.ThreadID, response.TurnID)
-	}
-}
-
-func TestFinalSummaryPanelHasGetThreadIDButton(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	ctx := context.Background()
-	thread := model.Thread{
-		ID:          "final-thread-full-id",
-		Title:       "Final",
-		ProjectName: "Codex",
-		CWD:         "/Users/example/project",
-		Status:      "idle",
-	}
-	snapshot := &appserver.ThreadReadSnapshot{
+	completed := &appserver.ThreadReadSnapshot{
 		Thread:           thread,
-		LatestTurnID:     "final-turn-full-id",
+		LatestTurnID:     "compact-actions-turn",
 		LatestTurnStatus: "completed",
 		LatestFinalText:  "Done.",
 		LatestFinalFP:    "final-fp",
 	}
-
-	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
-	if token := callbackTokenForButton(buttons, "查看会话 ID"); token == "" {
-		t.Fatalf("Get thread id button not found in final summary buttons %#v", buttons)
+	_, finalButtons, _ := service.renderFinalCard(ctx, 42, thread, completed)
+	if got, want := buttonTexts(finalButtons), "📋 详情\n切换会话"; got != want {
+		t.Fatalf("Final card buttons = %q, want %q", got, want)
 	}
 }
 
-func TestFinalCardGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
+func TestActivityCardSwitchShortcutOpensThreadPickerWithoutEditingCard(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	thread := model.Thread{ID: "switch-shortcut-thread", Title: "Current session", Status: "active"}
+	service.live = &stubSession{threadListResult: map[string]any{"data": []any{
+		map[string]any{"id": thread.ID, "name": thread.Title, "status": "active"},
+		map[string]any{"id": "another-thread", "name": "Another session", "status": "idle"},
+	}}}
+	service.liveConnected = true
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "switch-shortcut-turn",
+		LatestTurnStatus: "inProgress",
+	}
+
+	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	token := callbackTokenForButton(buttons, "切换会话")
+	if token == "" {
+		t.Fatalf("switch shortcut missing from %#v", buttons)
+	}
+	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(switch shortcut) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "可用会话") || !strings.Contains(buttonTexts(response.Buttons), "Another session") {
+		t.Fatalf("thread picker response = %#v", response)
+	}
+	if len(sender.edits) != 0 {
+		t.Fatalf("switch shortcut edited the activity card: %#v", sender.edits)
+	}
+}
+
+func TestThreadPickerPaginatesRuntimeSessions(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
 	ctx := context.Background()
-	thread := model.Thread{
-		ID:          "final-card-thread-full-id",
-		Title:       "Final card",
-		ProjectName: "Codex",
-		CWD:         "/Users/example/project",
-		Status:      "idle",
+	firstPage := make([]any, 0, threadPickerPageSize)
+	for index := 1; index <= threadPickerPageSize; index++ {
+		firstPage = append(firstPage, map[string]any{
+			"id": fmt.Sprintf("page-one-thread-%d", index), "name": fmt.Sprintf("最近会话 %d", index), "status": "idle",
+		})
 	}
-	snapshot := &appserver.ThreadReadSnapshot{
-		Thread:           thread,
-		LatestTurnID:     "final-card-turn-full-id",
-		LatestTurnStatus: "completed",
-		LatestFinalText:  "Done.",
-		LatestFinalFP:    "final-card-fp",
-	}
+	session := &stubSession{threadListPages: map[string]map[string]any{
+		"": {
+			"data":       firstPage,
+			"nextCursor": "cursor-2",
+		},
+		"cursor-2": {
+			"data": []any{
+				map[string]any{"id": "older-thread-1", "name": "更早会话 1", "status": "idle"},
+				map[string]any{"id": "older-thread-2", "name": "更早会话 2", "status": "idle"},
+			},
+		},
+	}}
+	service.live = session
+	service.liveConnected = true
 
-	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
-	token := callbackTokenForButton(buttons, "查看会话 ID")
-	if token == "" {
-		t.Fatalf("Get thread id button not found in final card buttons %#v", buttons)
+	first, err := service.handleCommand(ctx, 123456789, 0, "/t", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/t) failed: %v", err)
 	}
+	if first == nil || !strings.Contains(first.Text, "第 1 页") || !strings.Contains(buttonTexts(first.Buttons), "最近会话 5") {
+		t.Fatalf("first page = %#v", first)
+	}
+	nextToken := callbackTokenForButton(first.Buttons, "下一页 ›")
+	if nextToken == "" {
+		t.Fatalf("first page buttons = %#v, want next page", first.Buttons)
+	}
+	second, err := service.HandleCallback(ctx, 123456789, 0, 0, 123456789, nextToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(next page) failed: %v", err)
+	}
+	if second == nil || !strings.Contains(second.Text, "第 2 页") || !strings.Contains(buttonTexts(second.Buttons), "更早会话 2") {
+		t.Fatalf("second page = %#v", second)
+	}
+	if callbackTokenForButton(second.Buttons, "‹ 上一页") == "" {
+		t.Fatalf("second page buttons = %#v, want previous page", second.Buttons)
+	}
+	if got, want := strings.Join(session.threadListCursors, ","), ",cursor-2,cursor-2"; got != want {
+		t.Fatalf("thread list cursors = %q, want %q", got, want)
+	}
+}
+
+func TestThreadPickerFillsVisiblePageAcrossFilteredRuntimePages(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, automationThreadStateKey("automation-hidden"), "scheduled-task"); err != nil {
+		t.Fatalf("SetState automation thread failed: %v", err)
+	}
+	session := &stubSession{threadListPages: map[string]map[string]any{
+		"": {
+			"data": []any{
+				map[string]any{"id": "visible-1", "name": "可见会话 1", "status": "idle"},
+				map[string]any{"id": "internal-1", "name": "内部会话 1", "status": "idle", "ephemeral": true},
+				map[string]any{"id": "automation-hidden", "name": "定时任务执行会话", "status": "idle"},
+				map[string]any{"id": "visible-2", "name": "可见会话 2", "status": "idle"},
+				map[string]any{"id": "internal-2", "name": "内部会话 2", "status": "idle", "ephemeral": true},
+			},
+			"nextCursor": "cursor-2",
+		},
+		"cursor-2": {
+			"data": []any{
+				map[string]any{"id": "visible-3", "name": "可见会话 3", "status": "idle"},
+				map[string]any{"id": "internal-3", "name": "内部会话 3", "status": "idle", "ephemeral": true},
+				map[string]any{"id": "visible-4", "name": "可见会话 4", "status": "idle"},
+			},
+			"nextCursor": "cursor-3",
+		},
+		"cursor-3": {
+			"data": []any{
+				map[string]any{"id": "visible-5", "name": "可见会话 5", "status": "idle"},
+			},
+		},
+	}}
+	service.live = session
+	service.liveConnected = true
+
+	page, err := service.handleCommand(ctx, 123456789, 0, "/t", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/t) failed: %v", err)
+	}
+	if page == nil || len(page.Buttons) != threadPickerPageSize {
+		t.Fatalf("page = %#v, want one full five-session page", page)
+	}
+	for index := 1; index <= threadPickerPageSize; index++ {
+		if !strings.Contains(buttonTexts(page.Buttons), fmt.Sprintf("可见会话 %d", index)) {
+			t.Fatalf("page buttons = %#v, missing visible session %d", page.Buttons, index)
+		}
+	}
+	if callbackTokenForButton(page.Buttons, "下一页 ›") != "" {
+		t.Fatalf("page buttons = %#v, must not expose an empty next page", page.Buttons)
+	}
+	if got, want := strings.Join(session.threadListCursors, ","), ",cursor-2,cursor-3"; got != want {
+		t.Fatalf("thread list cursors = %q, want %q", got, want)
+	}
+}
+
+func TestLegacyGetThreadIDCallbackStillSendsCopyableIDs(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	token := service.callbackButton(ctx, "legacy id", "get_thread_id", "legacy-thread-full-id", "legacy-turn-full-id", "", nil).CallbackData
 
 	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
 	if err != nil {
-		t.Fatalf("HandleCallback(final get_thread_id) failed: %v", err)
+		t.Fatalf("HandleCallback(legacy get_thread_id) failed: %v", err)
 	}
-	if response == nil || response.Text != "会话 ID：\nfinal-card-thread-full-id\n\n运行 ID：\nfinal-card-turn-full-id" {
-		t.Fatalf("response = %#v, want copyable final card ids", response)
+	if response == nil || response.Text != "会话 ID：\nlegacy-thread-full-id\n\n运行 ID：\nlegacy-turn-full-id" {
+		t.Fatalf("response = %#v, want copyable legacy ids", response)
 	}
 }
 
@@ -5451,6 +5617,78 @@ func TestReasoningMenuUsesSelectedModelEfforts(t *testing.T) {
 	}
 }
 
+func TestCompactModelCommandsQueryAndSwitchSequentially(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-current"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexReasoningStateKey, "medium"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	service.live = &stubSession{models: []appserver.ModelOption{
+		{ID: "gpt-current", IsDefault: true, SupportedReasoningEffort: []string{"low", "medium"}},
+		{ID: "gpt-next", SupportedReasoningEffort: []string{"high", "xhigh"}},
+	}}
+	service.liveConnected = true
+
+	status, err := service.handleCommand(ctx, 123456789, 0, "/m", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/m) failed: %v", err)
+	}
+	if status == nil || !strings.Contains(status.Text, "gpt-current") || !strings.Contains(status.Text, "medium") {
+		t.Fatalf("/m response = %#v, want current model and reasoning effort", status)
+	}
+	if len(status.Buttons) != 0 {
+		t.Fatalf("/m buttons = %#v, want read-only status", status.Buttons)
+	}
+
+	modelMenu, err := service.handleCommand(ctx, 123456789, 0, "/sm", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/sm) failed: %v", err)
+	}
+	if modelMenu == nil || !strings.Contains(modelMenu.Text, "1/2") {
+		t.Fatalf("/sm model menu = %#v, want first step", modelMenu)
+	}
+	modelToken := callbackTokenForButton(modelMenu.Buttons, "gpt-next")
+	if modelToken == "" {
+		t.Fatalf("/sm model buttons = %#v, want gpt-next", modelMenu.Buttons)
+	}
+
+	reasoningMenu, err := service.HandleCallback(ctx, 123456789, 0, 902, 123456789, modelToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(sequential model select) failed: %v", err)
+	}
+	if reasoningMenu == nil || !strings.Contains(reasoningMenu.Text, "2/2") {
+		t.Fatalf("reasoning menu = %#v, want second step", reasoningMenu)
+	}
+	if callbackTokenForButton(reasoningMenu.Buttons, "high") == "" || callbackTokenForButton(reasoningMenu.Buttons, "low") != "" {
+		t.Fatalf("reasoning buttons = %#v, want selected model efforts", reasoningMenu.Buttons)
+	}
+	reasoningToken := callbackTokenForButton(reasoningMenu.Buttons, "xhigh")
+	if reasoningToken == "" {
+		t.Fatalf("reasoning buttons = %#v, want xhigh", reasoningMenu.Buttons)
+	}
+
+	saved, err := service.HandleCallback(ctx, 123456789, 0, 902, 123456789, reasoningToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(reasoning select) failed: %v", err)
+	}
+	if saved == nil || !strings.Contains(saved.Text, "gpt-next") || !strings.Contains(saved.Text, "xhigh") {
+		t.Fatalf("saved response = %#v, want selected values", saved)
+	}
+	if len(saved.Buttons) != 0 {
+		t.Fatalf("saved buttons = %#v, want completed flow", saved.Buttons)
+	}
+	modelValue, _ := service.store.GetState(ctx, codexModelStateKey)
+	reasoningValue, _ := service.store.GetState(ctx, codexReasoningStateKey)
+	if modelValue != "gpt-next" || reasoningValue != "xhigh" {
+		t.Fatalf("stored settings = %q/%q, want gpt-next/xhigh", modelValue, reasoningValue)
+	}
+}
+
 func TestSettingsCallbacksMissingValueUseAuto(t *testing.T) {
 	t.Parallel()
 
@@ -5790,6 +6028,8 @@ func (s *startCountingSession) StartCalls() int {
 type stubSession struct {
 	threadReads               map[string]map[string]any
 	threadListResult          map[string]any
+	threadListPages           map[string]map[string]any
+	threadListCursors         []string
 	threadListCalls           int
 	archivedThreadPages       map[string]map[string]any
 	models                    []appserver.ModelOption
@@ -5834,6 +6074,7 @@ type turnCall struct {
 	collaborationMode string
 	model             string
 	reasoningEffort   string
+	speed             string
 	inputs            []control.UserInput
 }
 
@@ -5852,6 +6093,10 @@ func (s *stubSession) Subscribe() <-chan appserver.Event {
 }
 func (s *stubSession) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
 	s.threadListCalls++
+	s.threadListCursors = append(s.threadListCursors, cursor)
+	if result, ok := s.threadListPages[cursor]; ok {
+		return result, nil
+	}
 	return s.threadListResult, nil
 }
 func (s *stubSession) ThreadListArchived(ctx context.Context, limit int, cursor string) (map[string]any, error) {
@@ -5919,6 +6164,7 @@ func (s *stubSession) TurnStart(ctx context.Context, threadID, message, cwd stri
 		collaborationMode: options.CollaborationMode,
 		model:             options.Model,
 		reasoningEffort:   options.ReasoningEffort,
+		speed:             options.Speed,
 	})
 	return map[string]any{"turn": map[string]any{"id": "started-turn"}}, nil
 }
@@ -5942,7 +6188,7 @@ func (s *stubSession) TurnStartInputs(ctx context.Context, threadID string, inpu
 	}
 	s.turnStartCalls = append(s.turnStartCalls, turnCall{
 		threadID: threadID, message: firstUserInputText(inputs), cwd: cwd,
-		collaborationMode: options.CollaborationMode, model: options.Model, reasoningEffort: options.ReasoningEffort,
+		collaborationMode: options.CollaborationMode, model: options.Model, reasoningEffort: options.ReasoningEffort, speed: options.Speed,
 		inputs: append([]control.UserInput(nil), inputs...),
 	})
 	return map[string]any{"turn": map[string]any{"id": "started-turn"}}, nil

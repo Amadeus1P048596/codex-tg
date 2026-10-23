@@ -152,6 +152,53 @@ func TestScheduledFailedRunsOnlySuppressesSuccessfulPush(t *testing.T) {
 	}
 }
 
+func TestScheduledDontNotifySuppressesOnlyExactSuccessfulResult(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		status       string
+		finalText    string
+		wantMessages int
+	}{
+		"exact sentinel":      {status: "completed", finalText: "DONT_NOTIFY", wantMessages: 0},
+		"surrounding space":   {status: "completed", finalText: "  DONT_NOTIFY\n", wantMessages: 0},
+		"sentinel in message": {status: "completed", finalText: "DONT_NOTIFY because nothing changed", wantMessages: 1},
+		"failed result":       {status: "failed", finalText: "DONT_NOTIFY", wantMessages: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service := newTestService(t)
+			ctx := context.Background()
+			service.cfg.AutomationsDir = filepath.Join(service.cfg.Paths.Home, "automations")
+			store := automation.NewStore(service.cfg.AutomationsDir, time.Now)
+			created, err := store.Apply(map[string]any{
+				"mode": "create", "name": "Conditional reminder", "prompt": "Check.",
+				"rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=0", "status": "ACTIVE", "kind": "cron",
+				"projectId": nil, "executionEnvironment": "local",
+			})
+			if err != nil {
+				t.Fatalf("create automation failed: %v", err)
+			}
+			taskID, _ := created["id"].(string)
+			thread := model.Thread{ID: "scheduled-" + strings.ReplaceAll(name, " ", "-"), Title: "Conditional reminder", Status: tc.status}
+			_ = service.store.UpsertThread(ctx, thread)
+			_ = service.store.SetState(ctx, automationThreadStateKey(thread.ID), taskID)
+			snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+				Thread: thread, LatestTurnID: "turn-conditional", LatestTurnStatus: tc.status,
+				LatestFinalText: tc.finalText, LatestFinalFP: "conditional-final",
+			}, time.Now().UTC())
+			_ = service.store.UpsertSnapshot(ctx, thread.ID, snapshot)
+			sender := &recordingSender{}
+			service.SetSender(sender)
+
+			service.syncThreadPanelToTarget(ctx, model.ObserverTarget{ChatID: 123456789, Enabled: true}, thread.ID, false, model.PanelSourceGlobalObserver)
+
+			if len(sender.messages) != tc.wantMessages {
+				t.Fatalf("messages = %#v, want %d", sender.messages, tc.wantMessages)
+			}
+		})
+	}
+}
+
 func TestScheduledExecutionThreadIsTrackedButHiddenFromConversationSurfaces(t *testing.T) {
 	t.Parallel()
 
@@ -215,6 +262,54 @@ func TestPushHTTPHandlerRequiresBearerAndDeduplicates(t *testing.T) {
 	}
 	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0].text+sender.messages[0].plainText, "银行金价提醒") {
 		t.Fatalf("messages = %#v, want one generic bank-gold push", sender.messages)
+	}
+}
+
+type ambiguousPushSender struct {
+	recordingSender
+}
+
+func (s *ambiguousPushSender) SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec, options model.SendOptions) ([]int64, error) {
+	_, _ = s.recordingSender.SendRenderedMessages(ctx, chatID, topicID, messages, buttons, options)
+	return nil, context.DeadlineExceeded
+}
+
+func TestPushHTTPHandlerDeduplicatesAfterAmbiguousSendFailure(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	service.cfg.PushToken = strings.Repeat("x", 32)
+	sender := &ambiguousPushSender{}
+	service.SetSender(sender)
+	handler := service.pushHTTPHandler()
+	body := []byte(`{"source":"mteam-keepalive","title":"M-Team keepalive","body":"ok","idempotency_key":"mteam-20260908","severity":"normal"}`)
+
+	first := httptest.NewRecorder()
+	firstRequest := httptest.NewRequest(http.MethodPost, "/v1/push", bytes.NewReader(body))
+	firstRequest.Header.Set("Authorization", "Bearer "+service.cfg.PushToken)
+	firstRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(first, firstRequest)
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first status = %d, want %d", first.Code, http.StatusBadGateway)
+	}
+
+	second := httptest.NewRecorder()
+	secondRequest := httptest.NewRequest(http.MethodPost, "/v1/push", bytes.NewReader(body))
+	secondRequest.Header.Set("Authorization", "Bearer "+service.cfg.PushToken)
+	secondRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second status = %d, want %d", second.Code, http.StatusAccepted)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if duplicate, _ := result["duplicate"].(bool); !duplicate {
+		t.Fatalf("second response = %s, want duplicate=true", second.Body.String())
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one attempted delivery", sender.messages)
 	}
 }
 

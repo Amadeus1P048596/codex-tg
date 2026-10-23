@@ -28,7 +28,7 @@ Codex App Server 运行在本机，Telegram 只承担经过权限限制的交互
 - 从手机查看本机 Codex 正在处理什么，以及任务是否需要输入。
 - 回复现有会话、启动普通任务或 Plan Mode，并停止当前任务。
 - 在多个 Codex 会话之间切换，同时避免后台任务刷屏。
-- 处理审批、结构化选择、图片收发、Details 和完整日志导出。
+- 处理审批、结构化选择、图片收发和按需 Details。
 - 保留本地优先的数据边界：工作区、Codex 会话、SQLite 状态和配置文件都留在自己的机器上。
 
 `codex-tg` 不以替代 Codex 官方 Remote Connections 为目标。它更偏向一个可扩展的
@@ -57,10 +57,13 @@ Codex · 处理中 · 38s
 - 长任务创建一张活动卡，非终态编辑最短间隔为 4 秒。
 - 搜索、读取、修改、构建和测试等原始事件会聚合为用户可读的最近活动。
 - 完成、失败、取消或等待输入时直接更新同一张卡片。
-- 较长结果可继续发送为独立的 `Codex · 结果` 消息。
+- 能放进终态卡片的多段回答在外层显示首段摘要，展开“详情”可查看完整回答；更长结果继续发送为独立的
+  `Codex · 结果` 消息。
 - Codex 输出的 Markdown pipe table 会自动转换成适合窄屏的 Telegram 记录列表：
   第一列作为加粗标题，其余列纵向显示为带标签字段；代码块里的表格示例保持原样。
-- 原始工具调用和输出仍可通过 Details、Tools file 与完整日志按需查看。
+- 原始工具调用和输出仍可通过 Details 与 Tools file 按需查看。
+- 运行中卡片只保留 `停止`、`追加指令`、`切换会话`；终态卡片只保留
+  `详情`、`切换会话`。线程选择器会作为新消息打开，不会覆盖原活动卡片。
 
 卡片开头的 emoji 用来标识会话，不表示状态；状态由 `处理中`、`需要输入`、
 `已完成`、`失败` 和 `已取消` 等文字明确表达。
@@ -69,30 +72,32 @@ Codex · 处理中 · 38s
 
 每个 Telegram chat/topic 只有一个前台 Codex 会话：
 
-- `/home`：打开会话首页，同时查看当前会话、后台运行中的会话及待处理数量；
+- `/h`（兼容 `/home`）：打开会话首页，同时查看当前会话、后台运行中的会话及待处理数量；
   后台运行项会显示状态和已运行时间，可直接点开对应会话卡片。
-- `/current`：确认当前前台会话及其状态。
-- `/threads`：以可点击标题列出当前 Telegram App Server runtime 中的真实会话。
+- `/c`（兼容 `/current`）：确认当前前台会话及其状态。
+- `/t`（兼容 `/threads`）：以可点击标题和前后翻页按钮列出当前 Telegram App Server runtime
+  中的真实会话，每页最多 5 个；内部会话和定时任务执行会话会在可见分页计数前过滤，
+  不会把一页拆成多个稀疏页面。
 - `/inbox`：保存后台已完成、失败、取消或需要输入的会话，重启后仍然存在。
-- 切换会话时会清理旧的非终态卡片，并显示新前台会话的当前状态。
+- 切换会话时会清理旧的非终态卡片，并显示新前台会话的当前状态；原会话在切换前已经展示过的
+  完成状态会被记为已确认，不会紧接着再发一条“已完成／切换回来”提醒。
 - 后台任务不会持续推送过程卡片，但其运行状态会汇总到 `/home`；终态或需要输入时
   仍只提供一次“切换至该会话”入口，避免多个进度卡同时刷新造成刷屏。
 
-`/threads` 只列出 Telegram 独立 runtime 中的真实会话，不会混入 Windows Codex
+`/t`（兼容 `/threads`）只列出 Telegram 独立 runtime 中的真实会话，不会混入 Windows Codex
 客户端的历史。这两个入口可以同时工作，但不会看到或写入彼此的 thread；如果配置到同一
 workspace，磁盘上的源码改动仍然是双方可见的。
 
 ### 会话创建与管理
 
-- `/newchat`：先输入纯文本标题，再发送首条提示词（可附带图片），在
+- `/new`：先输入纯文本标题，再发送首条提示词（可附带图片），在
   `Documents/Codex/<日期>/<标题>` 下创建 Chat。
-- `/newthread`：使用相同的“纯文本标题 → 可带图片的提示词”流程创建普通会话，但不创建
-  Chat 文件夹。
-- `/newchat <提示词>` 与 `/newthread <提示词>`：保留单行快捷形式。
+- `/new <提示词>`：保留单行快捷形式；已有项目中的新会话继续从 `/projects` 创建。
+- `/newchat` 与 `/newthread`：作为隐藏兼容命令继续可用，不再出现在默认命令菜单中。
 - `/cancel`：取消正在等待标题或首条提示词的新建流程。
 - `/title <标题>`：重命名当前会话，并防止后续自动刷新覆盖用户设置的标题。
-- `/archive`：仅归档当前空闲会话，执行前需要按钮确认。
-- `/unarchive`：按每页 10 条列出真实归档会话并恢复。
+- `/a`（兼容 `/archive`）：仅归档当前空闲会话，执行前需要按钮确认。
+- `/un`（兼容 `/unarchive`）：按每页 10 条列出真实归档会话并恢复。
 
 ### Telegram 独立 runtime 内的写入会话
 
@@ -104,7 +109,7 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
 - `/bind` 或卡片上的 `在 TG 中继续` 会切换前台路由，并让 TG live App Server 加载该会话。
 - 若隔离 runtime 内意外存在另一个 App Server writer，Telegram 会报告冲突；输入不会排队，
   也不会偷偷创建并行 turn。这个检查是 runtime 内的防御措施，不代表 Desktop 正在共享会话。
-- `/release` 或 `释放空闲写入权` 会在所有相关会话都安全空闲时重建 live App Server，
+- `/release` 会在所有相关会话都安全空闲时重建 live App Server，
   只读轮询保持连接。
 - 连续 5 分钟没有允许用户的 Telegram 消息或按钮操作时，守护进程会尝试同样的安全释放；
   活跃任务、审批或等待输入会推迟释放。
@@ -118,6 +123,8 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
 - 可以向已经路由的会话发送 Telegram 图片；机器人选择最大尺寸的 photo，下载上限为
   20 MiB，并以 App Server `localImage` 输入启动或 steer 当前 turn。
 - 图片可带说明文字；没有说明时会使用一个简短的默认图片分析提示。
+- Telegram 相册会按 `media_group_id` 短暂聚合，说明文字和全部图片作为一次输入提交，
+  不会再把后续图片拆成运行中的追加指令。
 - App Server 接受请求后，权限为私有的临时图片会保留 30 分钟，避免异步读取时文件已经被删；
   随后自动删除，启动时和后续下载前也会清理超过 24 小时的遗留文件。
 - 图片输入不会另外产生“已收到图片”卡片。
@@ -131,8 +138,8 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
   prompt 不会作为 Telegram 图片说明泄露，最终卡片也只保留图片名称而不展示本地路径。
 
 记录标题后，可以把纯图片或“说明文字＋图片”作为新会话的首条提示词；若仍在等待标题，
-图片不会误投当前会话，机器人会提示先发送纯文本标题。媒体组、用图片充当标题，以及给单行
-`/newchat <提示词>` 或 `/newthread <提示词>` 命令附图，当前不在支持范围内。
+图片不会误投当前会话，机器人会提示先发送纯文本标题。用图片充当标题，以及给单行
+`/new <提示词>`（以及兼容的 `/newchat <提示词>`、`/newthread <提示词>`）命令附图，当前不在支持范围内。
 
 ### 定时任务
 
@@ -146,11 +153,15 @@ daemon 每 15 秒检查一次到期任务，并在 TG 私有 App Server 中为�
   都是新的 thread，避免把旧对话状态、writer 所有权或失败上下文带进下一次计划执行。
 - Desktop 与 TG 的任务目录和调度器完全隔离，因此 Desktop 是否运行不会影响 TG 定时任务，也不会
   因两个客户端同时加载同一份定义而重复执行。
-- 每个任务可保存独立的 model、reasoning effort 和可选 `cwd`；未设置 `cwd` 时使用 daemon 默认目录。
+- 调度使用本地时区的简化 RRULE，支持 `HOURLY`、`DAILY`、`WEEKLY` 和 `MONTHLY`；月度任务用
+  `BYMONTHDAY=1..31` 指定日期，某月不存在该日期时跳过该月。
+- 所有现有会话、新建会话和定时任务共用全局模型、推理强度和 `/speed` 速度设置；修改后从下一次
+  `turn/start` 生效，正在运行的 turn 不会被中断。任务只保存可选 `cwd`，未设置时使用 daemon 默认目录。
 - 到期时先在 SQLite 中持久领取该时间槽；daemon 重启后不会重复启动同一时间槽。任务在 App Server
   暂未就绪时保持等待，连接恢复后再执行。
 - 创建或首次更新任务时，daemon 从 App Server 完成事件中记录任务来源 thread 与当时的会话标题；
   这项元数据更新不会改变任务的 `updated_at`，因此不会推迟下一个计划时间槽。
+- 成功任务的最终响应完全等于 `DONT_NOTIFY` 时仍会记录完成状态，但不会发送 Telegram 消息。
 - 任务提示词以明文保存在本机任务目录，不应包含 token、密码或其他秘密。
 
 默认目录是 `~/.codex-tg/automations`，可用 `CTR_GO_AUTOMATIONS_DIR` 改到另一个 TG 专用目录。
@@ -273,8 +284,8 @@ Windows 和 Linux 当前建议使用自己的进程管理方式运行 `ctr-go da
 
 ```text
 /start
-/home
-/threads
+/h
+/t
 /observe all
 ```
 
@@ -284,20 +295,26 @@ Windows 和 Linux 当前建议使用自己的进程管理方式运行 `ctr-go da
 
 | 类别 | 命令 | 作用 |
 | --- | --- | --- |
-| 首页与导航 | `/start`、`/home` | 查看前台会话、后台运行状态与待处理摘要 |
-| 首页与导航 | `/current`、`/inbox` | 查看当前会话或后台待处理会话 |
-| 首页与导航 | `/threads`、`/projects` | 切换 runtime 会话或从项目视图导航 |
-| 新建会话 | `/newchat`、`/newthread`、`/new` | 创建 Chat、普通会话或指定项目会话 |
-| 会话管理 | `/title`、`/archive`、`/unarchive`、`/cancel` | 重命名、归档、恢复或取消待输入流程 |
+| 首页与导航 | `/start`、`/h` | 查看前台会话、后台运行状态与待处理摘要 |
+| 首页与导航 | `/c`、`/inbox` | 查看当前会话或后台待处理会话 |
+| 首页与导航 | `/t`、`/projects` | 切换 runtime 会话或从项目视图导航 |
+| 新建会话 | `/new` | 创建带独立 Chat 目录的新会话；项目会话从 `/projects` 创建 |
+| 会话管理 | `/title`、`/a`、`/un`、`/cancel` | 重命名、归档、恢复或取消待输入流程 |
 | 路由与输入 | `/show`、`/bind`、`/reply` | 查看、在 TG 中继续或向指定会话发送内容 |
 | Plan Mode | `/plan`、`/reply --plan` | 在路由会话中启动 Plan Mode |
-| 模型设置 | `/settings`、`/model`、`/effort` | 查看并修改 Telegram 发起任务使用的模型设置 |
+| 模型设置 | `/m`、`/sm` | 查询当前模型与推理强度，或依次选择模型和该模型支持的推理强度 |
+| 速度设置 | `/speed` | 在 `normal` 与 `fast` 之间切换；`fast` 响应更快但消耗更多 Codex 额度 |
 | 观察与诊断 | `/observe all\|off`、`/context`、`/status` | 管理全局观察目标并查看路由/运行状态 |
 | 写入权与维护 | `/release`、`/repair`、`/stop` | 释放空闲 live 写入权、重建 App Server 会话或停止任务 |
 | 审批 | `/approve`、`/deny` | 接受或拒绝待审批请求 |
 | 卡片兼容 | `/panelmode per_run\|stable` | 切换每 turn 卡片或稳定复用卡片模式 |
 
 回复路由优先级为：显式 thread id → 回复消息绑定 → 一次性 steer/answer 状态 → 当前 chat/topic 绑定。
+
+模型、推理强度与速度设置对所有后续 TG 会话 turn 与定时任务生效。`/settings`、`/model`、`/effort`
+仍作为兼容命令保留；已经运行中的 turn 不会因设置切换而中断。`normal` 会向 App Server 明确发送
+标准服务档位，`fast` 会发送快速档位；支持范围和额度消耗以
+[OpenAI Codex Speed 文档](https://developers.openai.com/docs/agent-configuration/speed)为准。
 
 ## 本地命令
 
@@ -309,6 +326,7 @@ ctr-go daemon run
 ctr-go status
 ctr-go doctor
 ctr-go repair
+ctr-go runtime status|sync|rollback
 ctr-go version
 ```
 
@@ -325,6 +343,9 @@ ctr-go version
 | `CTR_GO_CODEX_CHATS_ROOT` | Codex UI Chat 根目录，默认 `~/Documents/Codex` |
 | `CTR_GO_CODEX_BIN` | Codex CLI 可执行文件路径或命令名 |
 | `CTR_GO_CODEX_HOME` | 仅传给 TG 子 App Server 的独立 `CODEX_HOME`；新配置默认 `~/.codex-tg/codex-home` |
+| `CTR_GO_CODEX_RUNTIME_MANAGED` | Windows 默认开启：把完整 Codex CLI bundle 复制到 TG 私有目录，并保留上一版回退 |
+| `CTR_GO_CODEX_RUNTIME_DIR` | 托管 CLI bundle 的目录，默认 `~/.codex-tg/codex-runtime` |
+| `CTR_GO_CODEX_RUNTIME_SYNC_SECONDS` | 本机新版 bundle 的后台检查周期，默认 21600 秒；不会中断当前进程 |
 | `CTR_GO_AUTOMATIONS_DIR` | TG 私有 Scheduled tasks 定义目录，默认 `~/.codex-tg/automations`；不得与 Desktop 共享 |
 | `CTR_GO_CONFIG` | 自定义 `config.env` 路径 |
 | `CTR_GO_HOME` | 自定义 daemon 数据、日志和 SQLite 根目录 |
@@ -340,6 +361,12 @@ ctr-go version
 
 `CTR_GO_FULL_ACCESS=true` 会显著扩大 Codex 对本机的操作权限，只应在理解风险且访问机器人
 受到严格白名单保护时启用。
+
+在 Windows 上，`CTR_GO_CODEX_BIN` 是首次引导和新版发现来源，不再是长期运行时的单点依赖。
+daemon 会使用 `CTR_GO_CODEX_RUNTIME_DIR` 内的完整私有副本启动两个 App Server；桌面端更新即使
+删除旧哈希目录，也不会带走正在使用的 TG 运行时。发现新版后只为下次重启做好切换，首次启动
+必须让 live/poll 两路都连通才会确认，否则回退上一版。该机制只复制 CLI 可执行文件，不复制或
+共享 Desktop 的会话、数据库、缓存和凭据。
 
 完整的性能、项目预览和投递重试配置可在
 [`internal/config/config.go`](internal/config/config.go) 中查看；最小示例见

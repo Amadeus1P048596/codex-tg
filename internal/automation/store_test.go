@@ -122,6 +122,18 @@ func TestStoreRejectsUnsafeOrUnsupportedAutomation(t *testing.T) {
 		"dtstart": {
 			"mode": "create", "name": "anchored", "prompt": "check", "rrule": "DTSTART:20260831T090000;FREQ=DAILY", "status": "ACTIVE", "kind": "cron", "projectId": nil, "model": "gpt-test", "reasoningEffort": "medium",
 		},
+		"monthly day zero": {
+			"mode": "create", "name": "bad monthly day", "prompt": "check", "rrule": "FREQ=MONTHLY;BYMONTHDAY=0;BYHOUR=9;BYMINUTE=0", "status": "ACTIVE", "kind": "cron", "projectId": nil,
+		},
+		"monthly day above range": {
+			"mode": "create", "name": "bad monthly day", "prompt": "check", "rrule": "FREQ=MONTHLY;BYMONTHDAY=32;BYHOUR=9;BYMINUTE=0", "status": "ACTIVE", "kind": "cron", "projectId": nil,
+		},
+		"monthly weekday": {
+			"mode": "create", "name": "unsupported monthly weekday", "prompt": "check", "rrule": "FREQ=MONTHLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0", "status": "ACTIVE", "kind": "cron", "projectId": nil,
+		},
+		"month day on daily frequency": {
+			"mode": "create", "name": "misplaced month day", "prompt": "check", "rrule": "FREQ=DAILY;BYMONTHDAY=1;BYHOUR=9;BYMINUTE=0", "status": "ACTIVE", "kind": "cron", "projectId": nil,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := store.Apply(args); err == nil {
@@ -131,7 +143,24 @@ func TestStoreRejectsUnsafeOrUnsupportedAutomation(t *testing.T) {
 	}
 }
 
-func TestStoreRequiresNativeCronRuntimeFields(t *testing.T) {
+func TestStoreAcceptsMonthlyAutomation(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir(), time.Now)
+	created, err := store.Apply(map[string]any{
+		"mode": "create", "name": "Monthly review", "prompt": "Review last month.",
+		"rrule":  "FREQ=MONTHLY;BYMONTHDAY=1,15;BYHOUR=10;BYMINUTE=0",
+		"status": "ACTIVE", "kind": "cron", "projectId": nil,
+	})
+	if err != nil {
+		t.Fatalf("create monthly automation failed: %v", err)
+	}
+	if got := created["rrule"]; got != "FREQ=MONTHLY;BYMONTHDAY=1,15;BYHOUR=10;BYMINUTE=0" {
+		t.Fatalf("rrule = %#v", got)
+	}
+}
+
+func TestStoreUsesSharedModelSettingsAndRequiresProjectBoundary(t *testing.T) {
 	t.Parallel()
 
 	store := NewStore(t.TempDir(), time.Now)
@@ -142,14 +171,21 @@ func TestStoreRequiresNativeCronRuntimeFields(t *testing.T) {
 		"rrule":     "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
 		"status":    "ACTIVE",
 		"kind":      "cron",
-		"model":     "gpt-test",
 		"projectId": nil,
 	}
-	if _, err := store.Apply(base); err == nil || !strings.Contains(err.Error(), "reasoningEffort is required") {
-		t.Fatalf("Apply error = %v, want missing reasoningEffort", err)
+	created, err := store.Apply(base)
+	if err != nil {
+		t.Fatalf("Apply without task-local model settings failed: %v", err)
 	}
+	if _, ok := created["model"]; ok {
+		t.Fatalf("created task = %#v, must not persist task-local model", created)
+	}
+	if _, ok := created["reasoning_effort"]; ok {
+		t.Fatalf("created task = %#v, must not persist task-local reasoning effort", created)
+	}
+
+	base["name"] = "Missing project boundary"
 	delete(base, "projectId")
-	base["reasoningEffort"] = "medium"
 	if _, err := store.Apply(base); err == nil || !strings.Contains(err.Error(), "projectId is required") {
 		t.Fatalf("Apply error = %v, want missing projectId", err)
 	}

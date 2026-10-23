@@ -66,6 +66,16 @@ Primary tests:
 - `internal/trayapp/actions_test.go::TestCTRGoArgs`
 - `internal/trayapp/actions_test.go::TestServiceSetupArgs`
 - `internal/appserver/client_test.go::TestBuildCommandScopesCodexHomeToAppServer`
+- `internal/appserver/client_windows_test.go::TestBuildCommandUsesWindowlessChildProcessOnWindows`
+- `internal/codexruntime/runtime_test.go::TestEnsureBootstrapsPrivateRuntimeFromConfiguredBundle`
+- `internal/codexruntime/runtime_test.go::TestEnsureUsesPrivateRuntimeWhenConfiguredBundleWasDeleted`
+- `internal/codexruntime/runtime_test.go::TestSyncPromotesNewestCompleteBundleAndKeepsPrevious`
+- `internal/codexruntime/runtime_test.go::TestSyncIgnoresIncompleteNewerBundle`
+- `internal/codexruntime/runtime_test.go::TestConfirmMarksActiveRuntimeValidated`
+- `internal/codexruntime/runtime_test.go::TestRollbackSwapsActiveAndPrevious`
+- `internal/codexruntime/runtime_test.go::TestSyncKeepsOnlyActiveAndPreviousVersions`
+- `internal/config/config_test.go::TestFromEnvDefaultsManagedCodexRuntimeOnWindows`
+- `internal/config/config_test.go::TestFromEnvCanDisableManagedCodexRuntime`
 
 Contract notes:
 
@@ -76,6 +86,12 @@ Contract notes:
 - Client-private Codex runtime SQLite/session state must never be linked between
   Desktop and Telegram homes. Shared static resources and an independent durable
   memory store are allowed.
+- Windows managed-runtime promotion must require a complete executable bundle,
+  preserve the previous active version, and avoid interrupting a running daemon.
+- A newly promoted Windows bundle is confirmed only after both live and poll App
+  Server sessions connect; startup failure rolls back once.
+- Windows background probes and App Server children must not create visible
+  console windows.
 - macOS LaunchAgent plists must carry only `CTR_GO_CONFIG`, never token/user/cwd env values.
 - Proxy env needed by the operator shell may be stored in the private config and
   applied by the process after startup.
@@ -91,12 +107,14 @@ Primary tests:
 
 - `internal/automation/store_test.go::TestStoreCRUDPreservesUnknownFields`
 - `internal/automation/store_test.go::TestStoreRejectsUnsafeOrUnsupportedAutomation`
-- `internal/automation/store_test.go::TestStoreRequiresNativeCronRuntimeFields`
+- `internal/automation/store_test.go::TestStoreUsesSharedModelSettingsAndRequiresProjectBoundary`
 - `internal/automation/store_test.go::TestStoreHidesAndProtectsDesktopHeartbeatTasks`
 - `internal/automation/store_test.go::TestStoreMarksTasksAsTelegramOwnedAndPersistsCWD`
 - `internal/automation/store_test.go::TestStoreSetsOriginWithoutChangingScheduleBoundary`
 - `internal/automation/scheduler_test.go::TestLatestDueUsesLocalWallClockAndTaskUpdateBoundary`
 - `internal/automation/scheduler_test.go::TestLatestDueSupportsHourlyAndWeeklyIntervals`
+- `internal/automation/scheduler_test.go::TestLatestDueSupportsMonthlySchedules`
+- `internal/automation/store_test.go::TestStoreAcceptsMonthlyAutomation`
 - `internal/automation/mcp_test.go::TestServeMCPListsAndCallsAutomationTool`
 - `internal/automation/mcp_test.go::TestServeMCPReturnsToolErrorsAsMCPContent`
 - `internal/appserver/client_test.go::TestAutomationMCPConfigUsesExplicitBinaryAndDirectory`
@@ -107,13 +125,20 @@ Primary tests:
 - `internal/daemon/push_service_test.go::TestCompletedAutomationMCPEventAttachesSourceConversation`
 - `internal/daemon/push_service_test.go::TestScheduledTerminalUsesPushServiceWithoutConversationPanel`
 - `internal/daemon/push_service_test.go::TestScheduledFailedRunsOnlySuppressesSuccessfulPush`
+- `internal/daemon/push_service_test.go::TestScheduledDontNotifySuppressesOnlyExactSuccessfulResult`
+- `internal/daemon/automation_terminal_test.go::TestScheduledTransientInterruptedThenSilentCompletion`
+- `internal/daemon/automation_terminal_test.go::TestScheduledTerminalPushIgnoresChangingFingerprint`
+- `internal/daemon/automation_terminal_test.go::TestScheduledPushRejectsOldRun`
+- `internal/daemon/automation_terminal_test.go::TestScheduledInterruptedGateExpiresOrRecovers`
 - `internal/daemon/push_service_test.go::TestScheduledExecutionThreadIsTrackedButHiddenFromConversationSurfaces`
 - `internal/daemon/push_service_test.go::TestPushHTTPHandlerRequiresBearerAndDeduplicates`
+- `internal/daemon/push_service_test.go::TestPushHTTPHandlerDeduplicatesAfterAmbiguousSendFailure`
 - `internal/daemon/push_service_test.go::TestPushHTTPHandlerRejectsOversizedBody`
 - `internal/daemon/push_service_test.go::TestNewRejectsUnsafePushListenerConfiguration`
 - `internal/daemon/push_service_test.go::TestStartFailsClosedWhenPushAddressIsAlreadyInUse`
 - `internal/config/config_test.go::TestIsDesktopAutomationsDirRejectsConventionalSharedStore`
 - `internal/daemon/service_test.go::TestAutomationTickStartsTelegramBackgroundTurnOnlyOnce`
+- `internal/daemon/service_test.go::TestTurnStartOptionsUseSharedSettingsForExistingAndNewThreads`
 - `internal/daemon/service_test.go::TestNewRejectsConventionalDesktopAutomationStore`
 - `internal/daemon/service_test.go::TestAutomationRunStateFollowsTerminalAppServerSnapshot`
 - `cmd/ctr-go/main_test.go::TestRunInitWritesPrivateConfigAndRefusesOverwrite`
@@ -128,12 +153,48 @@ Contract notes:
 - Both `thread/start` and `thread/resume` must receive the MCP config so existing
   Telegram threads gain the tool without rollout rewrites.
 - Only standalone `cron` tasks are accepted. Heartbeat continuation is invalid.
+- Local-time RRULEs support hourly, daily, weekly, and monthly frequencies.
+  Monthly `BYMONTHDAY` accepts 1 through 31 and skips a month when the selected
+  calendar day does not exist.
 - The daemon owns due-slot calculation and an at-most-once SQLite claim; App
   Server owns the new thread and turn after dispatch.
+- Existing conversations, new conversations, and scheduler-created turns read
+  one SQLite-backed model/reasoning/speed setting set at `turn/start`; task-local
+  and thread-local model fallbacks are not execution authority.
 - Scheduler execution threads stay pollable internally but are filtered from
   `/home`, `/threads`, `/inbox`, projects, and ordinary conversation cards.
+- A completed scheduled run whose trimmed final response is exactly
+  `DONT_NOTIFY` records completion without emitting a unified push.
+- The push service durably claims an idempotency key before Telegram delivery;
+  an ambiguous timeout is not replayed with the same key.
 - Live operator QA must confirm a real due occurrence starts in the TG runtime
   and produces Telegram readback without appearing in the Desktop task store.
+
+## Telegram Codex Model Settings
+
+ADR: `docs/adr/ADR-011-telegram-codex-model-settings.md`.
+
+Primary tests:
+
+- `internal/daemon/service_test.go::TestCompactModelCommandsQueryAndSwitchSequentially`
+- `internal/daemon/service_test.go::TestModelMenuPersistsSelectedModel`
+- `internal/daemon/service_test.go::TestReasoningMenuUsesSelectedModelEfforts`
+- `internal/daemon/service_test.go::TestTurnStartOptionsUseSharedSettingsForExistingAndNewThreads`
+- `internal/daemon/service_test.go::TestSpeedMenuPersistsSelectedSpeed`
+- `internal/appserver/client_test.go::TestTurnStartParamsIncludesPerTurnServiceTier`
+- `internal/telegram/bot_test.go::TestDefaultCommandsExposeCompactNavigationCommands`
+
+Contract notes:
+
+- `/m` is read-only and reports the model and reasoning effort currently stored
+  in SQLite.
+- `/sm` is a two-step callback flow: model first, then an effort supported by
+  that selected model. It edits one menu message throughout the flow.
+- `/settings`, `/model`, and `/effort` remain routeable compatibility controls.
+- `/speed` persists `normal` or `fast` and maps them to per-turn App Server
+  service tiers `default` or `fast`.
+- The shared settings affect future Telegram turns and scheduled runs, not
+  turns already in progress.
 
 ## Plan Mode Routing
 
@@ -199,7 +260,7 @@ Primary tests:
 - `internal/daemon/service_test.go::TestProjectNewThreadArmsThenPlainTextCreatesThread`
 - `internal/daemon/service_test.go::TestProjectNewThreadRejectsThreadStartWithoutID`
 - `internal/daemon/service_test.go::TestProjectNewThreadTurnStartFailureSavesThread`
-- `internal/daemon/service_test.go::TestNewChatCommandCreatesCodexUIChatCWDAndBinds`
+- `internal/daemon/service_test.go::TestNewCommandCreatesCodexUIChatCWDAndBinds`
 - `internal/daemon/service_test.go::TestNewChatCommandWithoutPromptCollectsTitleThenPrompt`
 - `internal/daemon/service_test.go::TestNewChatCWDUsesFallbackSlugAndCollisionSuffix`
 - `internal/daemon/service_test.go::TestNewThreadCommandCreatesThreadWithoutCWDAndBinds`
@@ -212,7 +273,10 @@ Primary tests:
 - `internal/daemon/service_test.go::TestNewChatCommandTurnStartFailureSavesAndBindsThread`
 - `internal/daemon/service_test.go::TestNewThreadCommandTurnStartFailureSavesAndBindsThread`
 - `internal/config/config_test.go::TestFromEnvReadsCodexChatsRoot`
-- `internal/telegram/bot_test.go::TestDefaultCommandsExposeNewChatMenuCommand`
+- `internal/telegram/bot_test.go::TestDefaultCommandsExposeCompactNavigationCommands`
+- `internal/daemon/thread_navigation_test.go::TestCompactNavigationAliasesMatchLongCommands`
+- `internal/daemon/thread_navigation_test.go::TestHomeNewSessionActionArmsChatTitleInPlace`
+- `internal/daemon/service_test.go::TestThreadPickerFillsVisiblePageAcrossFilteredRuntimePages`
 - `internal/daemon/service_test.go::TestSummaryPanelDoesNotShowStalePendingUserInputButtons`
 - `tests/config_env_test.go::TestFromEnvProjectChatLimitsClampInvalidValues`
 
@@ -220,7 +284,7 @@ Live E2E:
 
 - Open `/projects`, choose a project, press `New thread`, send a prompt, and verify a new thread/run reaches `[Final]`.
 - Open `/projects`, verify normal projects are sorted by recent activity, `Documents/Codex` threads are shown only as latest Chat previews, then open full `Chats` pagination and select a Chat.
-- Run `/newchat`, enter a title, then enter a distinct prompt. Verify the App Server title matches the first input, only the second input starts the turn, the title-derived cwd exists under the configured Chats root, the thread reaches its Completed card, `/projects -> Open Chats` shows it, and a plain follow-up routes to the newly bound Chat thread.
+- Run `/new`, enter a title, then enter a distinct prompt. Verify the App Server title matches the first input, only the second input starts the turn, the title-derived cwd exists under the configured Chats root, the thread reaches its Completed card, `/projects -> Open Chats` shows it, and a plain follow-up routes to the newly bound Chat thread.
 - Repeat the interactive flow with a captioned photo as the second input. Verify
   the new thread receives both text and `localImage`, and the previous binding
   receives neither. Send a photo during the title stage and verify the title
@@ -237,7 +301,7 @@ Contract notes:
 - Threads under generic `Documents/Codex` cwd roots or configured `CTR_GO_CODEX_CHATS_ROOT` are Codex UI `Chats`, not normal projects. A Chat selection opens and binds its single thread; Chat lists do not expose project `New thread`.
 - Main `/projects` uses project pagination with configurable preview limits and keeps latest Chat previews newest-first. Full Chat pagination lives behind `Open Chats`.
 - Project buttons use `N. Project name`; Chat buttons use `Chat N. Thread name`. The menu must not render internal `key:` rows and must show each project row's `last thread:`.
-- `/newchat <prompt>` creates a dated Chat cwd from a prompt slug and passes that cwd to App Server `thread/start`; it remains the backward-compatible one-line form.
+- `/new <prompt>` creates a dated Chat cwd from a prompt slug and passes that cwd to App Server `thread/start`; `/newchat` remains an equivalent hidden compatibility route.
 - `/newthread <prompt>` creates a new App Server thread without a Telegram-selected cwd parameter. It must not create a Chat folder; App Server may still attach the daemon default cwd.
 - `/newchat` and `/newthread` without prompts collect an explicit plain-text
   title and then a distinct first prompt, which may contain Telegram
@@ -256,14 +320,14 @@ ADR: `docs/adr/ADR-007-parallel-thread-visual-identity.md`
 Primary tests:
 
 - `internal/daemon/service_test.go::TestContextCardBoundThreadIncludesFullThreadID`
-- `internal/daemon/service_test.go::TestSummaryPanelGetThreadIDButtonSendsCopyableIDs`
-- `internal/daemon/service_test.go::TestFinalSummaryPanelHasGetThreadIDButton`
-- `internal/daemon/service_test.go::TestFinalCardGetThreadIDButtonSendsCopyableIDs`
+- `internal/daemon/service_test.go::TestActivityCardButtonsUseCompactLayouts`
+- `internal/daemon/service_test.go::TestLegacyGetThreadIDCallbackStillSendsCopyableIDs`
 
 Contract notes:
 
 - Header chips like `T:d663` and `R:d9bc` are visual hints only.
-- Operators must be able to retrieve copyable full ids from Telegram without SQLite/log access.
+- Operators retrieve copyable full thread identity through `/context`; new
+  activity cards do not expose a dedicated full-id button.
 - The default activity card emphasizes the conversation marker, Codex, textual
   state, result, and timing. Short ids remain secondary code-styled metadata.
 
@@ -280,21 +344,31 @@ ADR: `docs/adr/ADR-004-final-card-details-ux.md`
 Primary tests:
 
 - `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile`
+- `internal/daemon/observer_ui_v2_test.go::TestFinalCardUsesExpandableAnswerWithoutRepeatedSummary`
 - `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsShowsToolOnlyTurnWithoutCommentary`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbacksUsePanelTurnInsteadOfLatestThreadTurn`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbacksStayBoundToOriginalPanelAfterNewerRunCompletes`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbackWithoutPanelIDDoesNotFallbackToCurrentPanel`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbackRejectsMismatchedMessageID`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsToolsFileRejectsMismatchedPanelRoute`
+- `internal/daemon/service_test.go::TestActivityCardButtonsUseCompactLayouts`
+- `internal/daemon/service_test.go::TestActivityCardSwitchShortcutOpensThreadPickerWithoutEditingCard`
+- `internal/daemon/service_test.go::TestThreadPickerPaginatesRuntimeSessions`
 
 Contract notes:
 
 - `Details`, pagination, `Tool on`, `Tools file`, and `Back` are bound to the completed panel/card that produced the callback.
 - A Details callback without a valid `panel_id`, with a mismatched thread/turn, or from another Telegram message is stale and must not edit/export current run data.
 - Pressing `Back` on an older completed run must restore that older Final Card in the same message, not duplicate or replace it with the latest run.
-- Finalization edits the Working card in place. Details/Back stay bound to that
-  same summary message id and must never target a newer turn.
+- Finalization sends a new notifying terminal card, rebinds Details/Back to its
+  message id, and deletes the old Working card only after successful delivery.
+  Callbacks must never target a newer turn.
 - Tool-only turns with no commentary and empty output still expose completed command/status in Details, Tool mode, and Tools file under `Tool activity`.
+- A multi-paragraph final that fits the card shows the complete answer only
+  inside the expandable block and does not repeat its opening paragraph outside.
+- Running cards expose exactly Stop, Steer, and Switch thread; completed cards
+  expose exactly Details and Switch thread. The picker does not edit its source
+  activity card.
 
 ## Telegram Activity Card And Notification Contract
 
@@ -306,7 +380,9 @@ Primary tests:
 
 - `internal/daemon/activity_aggregator_test.go`
 - `internal/daemon/activity_lifecycle_test.go`
-- `internal/daemon/activity_lifecycle_test.go::TestShortFinalCompletesWorkingCardAndSendsAudibleNotice`
+- `internal/daemon/activity_lifecycle_test.go::TestShortFinalReplacesWorkingCardWithNotifyingResult`
+- `internal/daemon/activity_lifecycle_test.go::TestLongFinalReplacesWorkingCardThenSendsFullResult`
+- `internal/daemon/activity_lifecycle_test.go::TestFinalSendFailureKeepsWorkingCardAndRetries`
 - `internal/daemon/notification_style_test.go`
 - `internal/tgformat/html_test.go`
 - `internal/telegram/api_test.go::TestClientSendMessageSilentSetsDisableNotification`
@@ -330,6 +406,8 @@ Primary tests:
 - `internal/daemon/foreground_session_test.go::TestBackgroundThreadSuppressesProgressAndSendsOneCompletionNotice`
 - `internal/daemon/foreground_session_test.go::TestBackgroundThreadSendsOneNeedsInputNoticeWithoutShowingProgressCard`
 - `internal/daemon/foreground_session_test.go::TestSwitchThreadHidesPreviousWorkingCardAndShowsSelectedCard`
+- `internal/daemon/foreground_session_test.go::TestSwitchAwayFromCompletedForegroundDoesNotSendBackgroundCompletionNotice`
+- `internal/daemon/foreground_session_test.go::TestSwitchAwayFromRunningForegroundStillNotifiesWhenItFinishes`
 - `internal/daemon/thread_admin_test.go::TestNewThreadUsesPromptTitleWhileAppServerTitleIsPlaceholder`
 - `internal/daemon/thread_admin_test.go::TestNewThreadBecomesTheForegroundSession`
 - `internal/daemon/thread_admin_test.go::TestSyncThreadsPreservesPromptTitleUntilRuntimePublishesRealTitle`
@@ -364,8 +442,8 @@ Live E2E:
 
 - Run a sub-four-second turn and verify typing followed by one terminal card.
 - Run a slow tool sequence and verify one Working message is edited no more than
-  once every four seconds, becomes Completed in place, and produces one compact
-  audible completion notice.
+  once every four seconds, then a new audible terminal card replaces it without
+  an extra one-line completion notice.
 - Verify raw `[Tool]`, `[Output]`, `Last completed tool`, and empty-output labels
   never appear in the default card.
 - Send a photo with and without a caption to a bound thread and verify the image
@@ -384,16 +462,17 @@ Contract notes:
   empty bold element.
 - The first four seconds use Telegram typing only; a typing API failure creates
   the Working card immediately.
-- One turn normally owns one message. Active edits have a four-second floor;
-  terminal and input-required transitions bypass it.
-- A short foreground terminal transition sends one de-duplicated compact audible
-  notice because Telegram does not notify for edits. Fast terminal cards and
-  separately sent long results are already audible and do not add that notice.
+- One turn normally leaves one primary message after cleanup. Active edits have
+  a four-second floor; input-required and terminal transitions bypass it.
+- A foreground terminal transition sends one de-duplicated, normally notifying
+  terminal card and then deletes the old Working card. If sending fails, the
+  Working card stays retryable. Fast terminal turns need no deletion step.
 - The leading emoji is conversation identity. Status is text, never a replacement emoji.
 - Raw tool events are aggregated, de-duplicated, prioritized, and reduced to at
   most three activities plus one compact current command.
-- Short finals edit the activity card in place. Long finals complete that card
-  and may continue in separate `Codex · Result` messages.
+- Short finals replace the Working card with the new terminal card. Long finals
+  use that card for the only notification and may continue in silent
+  `Codex · Result` messages.
 - Photo input uses Telegram `getFile` plus App Server `localImage`; no photo
   receipt or User card is created.
 - A successfully dispatched photo remains on disk for the bounded App Server
@@ -417,11 +496,13 @@ Contract notes:
   prompt-derived fallback for legacy one-line creation; a real App Server title may replace an automatic fallback. `/title` writes
   through, marks the title as user-owned, and updates the current card without
   creating a replacement card.
-- `/current` shows only the foreground session with short metadata. `/archive`
-  requires confirmation and rejects a stale confirmation after focus changes.
-  Active and input-waiting sessions cannot be archived. `/unarchive` uses App
-  Server's archived filter, ten-row cursor pages, title buttons, and in-place
-  restore results with switch/continue actions.
+- `/c`, `/a`, and `/un` are the menu-visible routes for `/current`, `/archive`,
+  and `/unarchive`; the long forms remain routeable but hidden from the compact
+  command menu. Current shows only the foreground session with short metadata.
+  Archive requires confirmation, rejects a stale confirmation after focus
+  changes, and blocks active or input-waiting sessions. Restore uses App Server's
+  archived filter, ten-row cursor pages, title buttons, and in-place results
+  with switch/continue actions.
 - `/start` and `/home` render the session hub. Home excludes the foreground from
   its background-running count, rejects stale terminal snapshots, expands at
   most five running rows with direct view actions, and summarizes any remainder.
@@ -463,7 +544,7 @@ Primary tests:
 - `internal/daemon/service_test.go::TestControlLoopProcessesRepairBeforeReconcile`
 - `internal/daemon/service_test.go::TestBootstrapTrackedStateResumesBoundThreadByDefault`
 - `internal/daemon/service_test.go::TestBootstrapTrackedStateSkipsManuallyReleasedBoundThread`
-- `internal/daemon/service_test.go::TestBindHereAcquiresWriterAndShowsReleaseButton`
+- `internal/daemon/service_test.go::TestBindHereAcquiresWriterWithoutCardWriterButtons`
 - `internal/daemon/service_test.go::TestBindHereKeepsRouteAndReportsAnotherWriterConflict`
 - `internal/daemon/service_test.go::TestReleaseWriterCallbackPersistsReleaseAndRecyclesLiveSession`
 - `internal/daemon/service_test.go::TestSendInputWriterConflictReturnsDirectResponseWithoutQueue`
@@ -473,7 +554,7 @@ Primary tests:
 - `internal/daemon/service_test.go::TestReleaseTelegramWritersRecyclesOnlyIdleLiveSession`
 - `internal/daemon/service_test.go::TestAutoReleaseTelegramWritersAfterFiveMinutesIdle`
 - `internal/daemon/service_test.go::TestAutoReleaseTelegramWritersWaitsForActiveTurn`
-- `internal/telegram/bot_test.go::TestDefaultCommandsExposeNewChatMenuCommand`
+- `internal/telegram/bot_test.go::TestDefaultCommandsExposeCompactNavigationCommands`
 - `internal/appserver/client_test.go::TestClientStartConcurrentCallsShareInitializedSession`
 - `internal/appserver/client_test.go::TestClientStartFailureLeavesClientRetryable`
 
@@ -486,7 +567,9 @@ Contract notes:
 - Explicit Telegram writes acquire a writer at dispatch time; unexpected writer
   conflicts from another connection in the isolated runtime fail immediately
   without queueing or parallel turns.
-- `/release` and the session-card release button fail closed for active or unverifiable Telegram-owned threads, persist release markers, and otherwise replace only the live session.
+- `/release` fails closed for active or unverifiable Telegram-owned threads,
+  persists release markers, and otherwise replaces only the live session;
+  writer management is not shown on compact activity cards.
 
 ## Transient Interrupted Gating
 
@@ -564,6 +647,8 @@ Primary tests:
 - `internal/tgformat/markdown_test.go::TestRenderSegmentsLeavesPipeTableSyntaxInsideCodeFenceUntouched`
 - `internal/tgformat/markdown_test.go::TestMarkdownToHTMLConvertsPipeTableToTelegramReadableRecords`
 - `internal/telegram/bot_test.go::TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored`
+- `internal/telegram/bot_test.go::TestBotCaptionedMediaGroupDispatchesOnceWithEveryPhoto`
+- `internal/telegram/bot_test.go::TestTelegramMessageDecodesMediaGroupID`
 - `internal/telegram/bot_test.go::TestRemoveStaleTelegramTempFilesRemovesOnlyExpiredPhotoInputs`
 - `internal/daemon/service_test.go::TestPendingNewChatConsumesCaptionAndLocalImageAsFirstPrompt`
 - `internal/daemon/service_test.go::TestPendingNewChatPhotoWhileWaitingForTitleDoesNotRouteToBinding`
@@ -577,6 +662,9 @@ Contract notes:
 - App Server RPC acceptance does not prove that an asynchronous `localImage`
   read has finished. Keep the private input for 30 minutes, schedule deletion,
   and remove matching leftovers older than 24 hours.
+- A captioned Telegram album is one logical input. Buffer members sharing its
+  `media_group_id`, preserve message order and reply routing, and dispatch the
+  caption plus every image in one App Server call after a short quiet window.
 - Pending interactive creation takes precedence over the existing binding for a
   photo first prompt. The title stage remains plain-text-only and must fail
   closed rather than misroute the photo.
@@ -664,6 +752,7 @@ Primary tests:
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelKeepsForeignRunningToolHidden`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom`
 - `internal/daemon/service_test.go::TestFinalCardShowsRunDuration`
+- `internal/daemon/activity_lifecycle_test.go::TestPerRunNewTurnCreatesNewCardAfterTypingDelayWhenOldPanelStillActive`
 
 Contract notes:
 

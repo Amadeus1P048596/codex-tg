@@ -261,10 +261,7 @@ func panelNeedsRefresh(panel *model.ThreadPanel, turnID, status, panelMode strin
 	if strings.TrimSpace(panel.CurrentTurnID) == "" {
 		return isTerminalStatus(panel.Status)
 	}
-	if panel.CurrentTurnID != turnID && isTerminalStatus(panel.Status) {
-		return true
-	}
-	return false
+	return strings.TrimSpace(panel.CurrentTurnID) != turnID
 }
 
 func samePanelTurn(panel *model.ThreadPanel, turnID string) bool {
@@ -782,22 +779,13 @@ func (s *Service) maybeUpdateRunNotice(ctx context.Context, sender Sender, panel
 
 func (s *Service) renderSummaryPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, pending *model.PendingApproval) (model.RenderedMessage, [][]model.ButtonSpec, string) {
 	pending = pendingForSnapshot(pending, snapshot)
-	writerButton := s.callbackButton(ctx, "在 TG 中继续", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
-	if s.ownsLiveThread(thread.ID) {
-		writerButton = s.callbackButton(ctx, "释放空闲写入权", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
-	}
 	buttons := [][]model.ButtonSpec{
 		{
 			s.callbackButton(ctx, "停止", "stop_turn", thread.ID, snapshot.LatestTurnID, "", nil),
 			s.callbackButton(ctx, "追加指令", "arm_steer", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
 		{
-			s.callbackButton(ctx, "显示卡片", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
-			writerButton,
-		},
-		{
-			s.callbackButton(ctx, "查看上下文", "show_context", thread.ID, snapshot.LatestTurnID, "", nil),
-			s.callbackButton(ctx, "查看会话 ID", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
+			s.callbackButton(ctx, "切换会话", "threads_shortcut", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
 	}
 	if pending != nil {

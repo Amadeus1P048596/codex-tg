@@ -18,8 +18,6 @@ type Task struct {
 	RRule                string
 	CWD                  string
 	ProjectID            string
-	Model                string
-	ReasoningEffort      string
 	NotificationPolicy   string
 	ExecutionEnvironment string
 	Owner                string
@@ -64,8 +62,6 @@ func taskFromValues(values map[string]any) (Task, error) {
 		RRule:                valueString(values["rrule"]),
 		CWD:                  valueString(values["cwd"]),
 		ProjectID:            valueString(values["project_id"]),
-		Model:                valueString(values["model"]),
-		ReasoningEffort:      valueString(values["reasoning_effort"]),
 		NotificationPolicy:   valueString(values["notification_policy"]),
 		ExecutionEnvironment: valueString(values["execution_environment"]),
 		Owner:                valueString(values["owner"]),
@@ -89,13 +85,14 @@ func valueString(value any) string {
 }
 
 type parsedRRule struct {
-	freq     string
-	interval int
-	hour     int
-	minute   int
-	byHour   bool
-	byMinute bool
-	days     map[time.Weekday]struct{}
+	freq      string
+	interval  int
+	hour      int
+	minute    int
+	byHour    bool
+	byMinute  bool
+	days      map[time.Weekday]struct{}
+	monthDays map[int]struct{}
 }
 
 // LatestDue returns the most recent scheduled occurrence at or before now. An
@@ -125,6 +122,8 @@ func LatestDue(task Task, now time.Time) (time.Time, bool, error) {
 		due = latestDailyDue(rule, boundary, now)
 	case "WEEKLY":
 		due = latestWeeklyDue(rule, boundary, now)
+	case "MONTHLY":
+		due = latestMonthlyDue(rule, boundary, now)
 	default:
 		return time.Time{}, false, fmt.Errorf("unsupported frequency %q", rule.freq)
 	}
@@ -144,13 +143,14 @@ func parseRRule(value string, defaults time.Time) (parsedRRule, error) {
 		components[strings.ToUpper(strings.TrimSpace(key))] = strings.ToUpper(strings.TrimSpace(raw))
 	}
 	rule := parsedRRule{
-		freq:     components["FREQ"],
-		interval: 1,
-		hour:     defaults.Hour(),
-		minute:   defaults.Minute(),
-		days:     map[time.Weekday]struct{}{},
-		byHour:   components["BYHOUR"] != "",
-		byMinute: components["BYMINUTE"] != "",
+		freq:      components["FREQ"],
+		interval:  1,
+		hour:      defaults.Hour(),
+		minute:    defaults.Minute(),
+		days:      map[time.Weekday]struct{}{},
+		monthDays: map[int]struct{}{},
+		byHour:    components["BYHOUR"] != "",
+		byMinute:  components["BYMINUTE"] != "",
 	}
 	if raw := components["INTERVAL"]; raw != "" {
 		rule.interval, _ = strconv.Atoi(raw)
@@ -164,6 +164,11 @@ func parseRRule(value string, defaults time.Time) (parsedRRule, error) {
 	for _, raw := range strings.Split(components["BYDAY"], ",") {
 		if day, ok := parseWeekday(raw); ok {
 			rule.days[day] = struct{}{}
+		}
+	}
+	for _, raw := range strings.Split(components["BYMONTHDAY"], ",") {
+		if day, err := strconv.Atoi(raw); err == nil && day >= 1 && day <= 31 {
+			rule.monthDays[day] = struct{}{}
 		}
 	}
 	return rule, nil
@@ -228,9 +233,52 @@ func latestWeeklyDue(rule parsedRRule, boundary, now time.Time) time.Time {
 	return time.Time{}
 }
 
+func latestMonthlyDue(rule parsedRRule, boundary, now time.Time) time.Time {
+	if len(rule.monthDays) == 0 {
+		rule.monthDays[boundary.Day()] = struct{}{}
+	}
+	anchorMonth := civilMonth(boundary)
+	candidateMonth := civilMonth(now)
+	if candidateMonth < anchorMonth {
+		return time.Time{}
+	}
+	candidateMonth -= (candidateMonth - anchorMonth) % rule.interval
+	for candidateMonth >= anchorMonth {
+		year, month := yearMonth(candidateMonth)
+		lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, now.Location()).Day()
+		var latest time.Time
+		for day := range rule.monthDays {
+			if day > lastDay {
+				continue
+			}
+			candidate := time.Date(year, month, day, rule.hour, rule.minute, 0, 0, now.Location())
+			if candidate.Before(boundary) || candidate.After(now) {
+				continue
+			}
+			if latest.IsZero() || candidate.After(latest) {
+				latest = candidate
+			}
+		}
+		if !latest.IsZero() {
+			return latest
+		}
+		candidateMonth -= rule.interval
+	}
+	return time.Time{}
+}
+
 func civilDay(value time.Time) int {
 	year, month, day := value.Date()
 	return int(time.Date(year, month, day, 0, 0, 0, 0, time.UTC).Unix() / int64(24*time.Hour/time.Second))
+}
+
+func civilMonth(value time.Time) int {
+	year, month, _ := value.Date()
+	return year*12 + int(month) - 1
+}
+
+func yearMonth(value int) (int, time.Month) {
+	return value / 12, time.Month(value%12 + 1)
 }
 
 func weekStartDay(value time.Time) int {

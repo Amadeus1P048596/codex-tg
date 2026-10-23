@@ -66,7 +66,7 @@ func (s *Service) renameCurrentThread(ctx context.Context, chatID, topicID int64
 		return nil, err
 	}
 	if thread == nil {
-		return &DirectResponse{Text: "当前没有已选择的会话，请先使用 /threads 或 /newthread。"}, nil
+		return &DirectResponse{Text: "当前没有已选择的会话，请先使用 /t 或 /new。"}, nil
 	}
 	if err := s.callLiveThreadAdmin(ctx, "thread_set_name", thread.ID, func(requestCtx context.Context, admin control.ThreadAdmin) error {
 		_, callErr := admin.ThreadSetName(requestCtx, thread.ID, title)
@@ -93,7 +93,7 @@ func (s *Service) currentThreadOverview(ctx context.Context, chatID, topicID int
 		return nil, err
 	}
 	if thread == nil {
-		return &DirectResponse{Text: "当前没有已选择的会话，请先使用 /threads、/newchat 或 /newthread。"}, nil
+		return &DirectResponse{Text: "当前没有已选择的会话，请先使用 /t 或 /new。"}, nil
 	}
 	status := currentThreadStatusLabel(*thread, nil)
 	if _, snapshot, snapshotErr := s.loadThreadPanelSnapshot(ctx, thread.ID); snapshotErr == nil && snapshot != nil {
@@ -151,7 +151,7 @@ func (s *Service) archiveCurrentThreadPrompt(ctx context.Context, chatID, topicI
 		return nil, err
 	}
 	if thread == nil {
-		return &DirectResponse{Text: "当前没有已选择的会话，请先使用 /threads 或 /newthread。"}, nil
+		return &DirectResponse{Text: "当前没有已选择的会话，请先使用 /t 或 /new。"}, nil
 	}
 	if blocked, response := s.archiveBlockedResponse(ctx, *thread); blocked {
 		return response, nil
@@ -162,7 +162,7 @@ func (s *Service) archiveCurrentThreadPrompt(ctx context.Context, chatID, topicI
 		s.callbackButton(ctx, "取消", "archive_cancel", thread.ID, "", "", nil),
 	}}
 	return &DirectResponse{
-		Text:     "确认归档当前会话？\n\n" + s.visualMarker(ctx, thread.ID) + " " + title + "\n\n归档后可通过 /unarchive 恢复。",
+		Text:     "确认归档当前会话？\n\n" + s.visualMarker(ctx, thread.ID) + " " + title + "\n\n归档后可通过 /un 恢复。",
 		Buttons:  buttons,
 		ThreadID: thread.ID,
 	}, nil
@@ -178,7 +178,7 @@ func (s *Service) confirmArchiveThread(ctx context.Context, chatID, topicID, mes
 	}
 	if current == nil || current.ID != route.ThreadID {
 		_ = s.store.ExpireCallbackRoute(ctx, route.Token)
-		return &DirectResponse{CallbackText: "会话已切换，请重新发送 /archive。"}, nil
+		return &DirectResponse{CallbackText: "会话已切换，请重新发送 /a。"}, nil
 	}
 	if blocked, response := s.archiveBlockedResponse(ctx, *current); blocked {
 		_ = s.store.ExpireCallbackRoute(ctx, route.Token)

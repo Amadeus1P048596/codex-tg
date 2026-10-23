@@ -569,22 +569,6 @@ func (s *Service) savePendingNewThreadState(ctx context.Context, chatID, topicID
 	return s.store.SetState(ctx, newThreadStateKey(chatID, topicID), string(payloadBytes))
 }
 
-func (s *Service) newThreadCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
-	selector, prompt := splitCommandHead(rest)
-	if selector == "" || strings.TrimSpace(prompt) == "" {
-		return s.newThreadUsage(ctx)
-	}
-	workspace, ok := s.resolveProjectWorkspaceSelector(ctx, selector)
-	if !ok {
-		return s.newThreadUsage(ctx)
-	}
-	return s.createThreadFromProjectPrompt(ctx, chatID, topicID, pendingNewThreadState{
-		ProjectName:   workspace.ProjectName,
-		DirectoryName: workspace.DirectoryName,
-		CWD:           workspace.CWD,
-	}, strings.TrimSpace(prompt))
-}
-
 func (s *Service) newChatCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
 	prompt := strings.TrimSpace(rest)
 	if prompt == "" {
@@ -693,45 +677,6 @@ func codexChatSlugFromPrompt(prompt string, now time.Time) string {
 		return "chat-" + now.Format("150405")
 	}
 	return slug
-}
-
-func (s *Service) newThreadUsage(ctx context.Context) (*DirectResponse, error) {
-	workspaces, err := s.projectWorkspaces(ctx)
-	if err != nil {
-		return nil, err
-	}
-	lines := []string{"Usage: /new <project-key-or-number> <prompt>"}
-	if len(workspaces) == 0 {
-		lines = append(lines, "No cached projects yet. Try /projects after Codex has seen a workspace.")
-		return &DirectResponse{Text: strings.Join(lines, "\n")}, nil
-	}
-	lines = append(lines, "", "Projects:")
-	for index, workspace := range workspaces {
-		lines = append(lines, fmt.Sprintf("%d. %s (%s)", index+1, workspace.Key, workspace.ProjectName))
-	}
-	return &DirectResponse{Text: strings.Join(lines, "\n")}, nil
-}
-
-func (s *Service) resolveProjectWorkspaceSelector(ctx context.Context, selector string) (projectWorkspace, bool) {
-	workspaces, err := s.projectWorkspaces(ctx)
-	if err != nil {
-		return projectWorkspace{}, false
-	}
-	selector = strings.TrimSpace(strings.ToLower(selector))
-	if selector == "" {
-		return projectWorkspace{}, false
-	}
-	if index, err := strconv.Atoi(selector); err == nil && index >= 1 && index <= len(workspaces) {
-		return workspaces[index-1], true
-	}
-	for _, workspace := range workspaces {
-		if strings.EqualFold(workspace.Key, selector) ||
-			strings.EqualFold(workspace.ProjectName, selector) ||
-			strings.EqualFold(workspace.DirectoryName, selector) {
-			return workspace, true
-		}
-	}
-	return projectWorkspace{}, false
 }
 
 func (s *Service) maybeConsumeNewThreadPrompt(ctx context.Context, chatID, topicID int64, text string) (*DirectResponse, bool, error) {

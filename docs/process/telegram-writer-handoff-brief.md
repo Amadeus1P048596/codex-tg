@@ -25,14 +25,13 @@ queuing a message, and let the operator recycle Telegram's idle live session saf
 
 ## UX / Operator Flow
 
-- `/bind` and `在 TG 中继续` call `thread/resume` and retain ownership. Repair and
+- `/bind` calls `thread/resume` and retains ownership. Repair and
   daemon restart reacquire bound writers unless they were manually released.
 - A plain message, `/reply`, or `/plan` calls `thread/resume` immediately before
   the write. If another connection in the isolated runtime owns the thread, Telegram reports the conflict
   and does not queue or create a parallel turn.
-- While the live App Server owns a session, summary and Final cards show
-  `释放空闲写入权` in place of `在 TG 中继续`.
-- `/release` and the release button check every thread written through the current Telegram live
+- Writer-management actions are omitted from compact summary and Final cards.
+- `/release` checks every thread written through the current Telegram live
   session. If any is active or cannot be verified, release is refused. Otherwise
   only the Telegram live App Server session is recycled, releasing all of its
   idle writer locks while the read-only polling session continues.

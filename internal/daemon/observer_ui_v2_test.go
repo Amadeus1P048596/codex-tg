@@ -53,6 +53,7 @@ type recordingSender struct {
 	photos    []recordedPhoto
 	edits     []recordedMessage
 	deletes   []recordedMessage
+	sendErr   error
 	editErr   error
 	photoErr  error
 }
@@ -75,6 +76,9 @@ func (s *recordingSender) SendPhotoData(ctx context.Context, chatID, topicID int
 func (s *recordingSender) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error) {
 	messageID := int64(len(s.messages) + 1)
 	s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: text, buttons: buttons, options: options})
+	if s.sendErr != nil {
+		return 0, s.sendErr
+	}
 	return messageID, nil
 }
 
@@ -84,6 +88,9 @@ func (s *recordingSender) SendRenderedMessages(ctx context.Context, chatID, topi
 		messageID := int64(len(s.messages) + 1)
 		s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: message.Text, entities: message.Entities, parseMode: message.ParseMode, plainText: message.PlainText, buttons: buttons, options: options})
 		ids = append(ids, messageID)
+	}
+	if s.sendErr != nil {
+		return nil, s.sendErr
 	}
 	return ids, nil
 }
@@ -228,6 +235,29 @@ func TestUserAndFinalCardsEmphasizeIdentityStatusAndTiming(t *testing.T) {
 	}
 	if strings.Index(final.Text, "1m 19s") > strings.Index(final.Text, snapshot.LatestFinalText) {
 		t.Fatalf("final card text = %q, want timing in header before response body", final.Text)
+	}
+}
+
+func TestFinalCardUsesExpandableAnswerWithoutRepeatedSummary(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "thread-final-summary", Title: "Compact final"}
+	answer := "结论：只保留一个入口。\n\n- `/new` 创建独立目录。\n- `/projects` 处理已有项目。\n\n旧命令继续兼容。"
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-final-summary",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  answer,
+	}
+
+	message, _, _ := service.renderFinalCard(ctx, 1, thread, snapshot)
+	if strings.Count(message.Text, "结论：只保留一个入口。") != 1 {
+		t.Fatalf("final card = %q, want the opening sentence rendered exactly once", message.Text)
+	}
+	if !strings.Contains(message.Text, "<blockquote expandable><b>详情</b>\n\n结论：只保留一个入口。\n\n⦁ <code>/new</code> 创建独立目录。") || !strings.Contains(message.Text, "旧命令继续兼容。") {
+		t.Fatalf("final card = %q, want the complete answer only inside expandable details", message.Text)
 	}
 }
 
@@ -469,7 +499,7 @@ func TestSyncThreadPanelFormatsFinalAnswerMarkdownWithEntities(t *testing.T) {
 	}
 }
 
-func TestFinalTransitionEditsWorkingCardInPlaceWithoutDeletes(t *testing.T) {
+func TestFinalTransitionSendsNotifyingCardThenDeletesWorkingCard(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -530,15 +560,15 @@ func TestFinalTransitionEditsWorkingCardInPlaceWithoutDeletes(t *testing.T) {
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.deletes) != 0 {
-		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != summaryID {
+		t.Fatalf("deletes = %#v, want Working card %d removed", sender.deletes, summaryID)
 	}
-	if len(sender.edits) != 1 {
-		t.Fatalf("edits = %#v, want one in-place final edit", sender.edits)
+	if len(sender.edits) != 0 || len(sender.messages) != 2 {
+		t.Fatalf("messages = %#v edits = %#v, want one new Final card", sender.messages, sender.edits)
 	}
-	final := sender.edits[0]
-	if final.messageID != summaryID || !hasHeaderKind(final.text, "Final") {
-		t.Fatalf("final = %#v, want Completed edit on Working message %d", final, summaryID)
+	final := sender.messages[1]
+	if final.messageID == summaryID || !hasHeaderKind(final.text, "Final") || final.options.Silent {
+		t.Fatalf("final = %#v, want a new notifying Completed card", final)
 	}
 	finalText := final.text
 	if strings.Contains(finalText, "[commentary]") || strings.Contains(finalText, "This completed commentary belongs in Details only.") {
@@ -548,8 +578,8 @@ func TestFinalTransitionEditsWorkingCardInPlaceWithoutDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.SummaryMessageID != summaryID || panel.LastFinalNoticeFP != "final-cleanup-fp" {
-		t.Fatalf("panel = %#v, want SummaryMessageID retained at %d with final fp", panel, summaryID)
+	if panel == nil || panel.SummaryMessageID != final.messageID || panel.LastFinalNoticeFP != "final-cleanup-fp" {
+		t.Fatalf("panel = %#v, want new Final message %d with final fp", panel, final.messageID)
 	}
 	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, final.messageID)
 	if err != nil {
@@ -1156,25 +1186,22 @@ func TestTelegramInputSyncAdoptsObserverPanelForSameTurn(t *testing.T) {
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
 
-	if len(sender.messages) != 1 || len(sender.edits) != 1 {
-		t.Fatalf("messages=%#v edits=%#v, want one in-place Final edit and one terminal notice", sender.messages, sender.edits)
+	if len(sender.messages) != 1 || len(sender.edits) != 0 {
+		t.Fatalf("messages=%#v edits=%#v, want one new Final card", sender.messages, sender.edits)
 	}
-	if sender.messages[0].options.Silent || !strings.Contains(sender.messages[0].text, "<b>Telegram race</b> 已完成") {
-		t.Fatalf("terminal notice=%#v, want audible completion", sender.messages[0])
+	final := sender.messages[0]
+	if !hasHeaderKind(final.text, "Final") || final.options.Silent {
+		t.Fatalf("final = %#v, want a notifying Final card", final)
 	}
-	final := sender.edits[0]
-	if final.messageID != 101 || !hasHeaderKind(final.text, "Final") {
-		t.Fatalf("final = %#v, want Final on observer message 101", final)
-	}
-	if len(sender.deletes) != 0 {
-		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != 101 {
+		t.Fatalf("deletes = %#v, want adopted Working card 101 removed", sender.deletes)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.SummaryMessageID != 101 || panel.SourceMode != model.PanelSourceTelegramInput || panel.LastFinalNoticeFP != "final-telegram-race-fp" {
-		t.Fatalf("panel = %#v, want adopted panel retained at message 101 with final fp", panel)
+	if panel == nil || panel.SummaryMessageID != final.messageID || panel.SourceMode != model.PanelSourceTelegramInput || panel.LastFinalNoticeFP != "final-telegram-race-fp" {
+		t.Fatalf("panel = %#v, want adopted panel moved to Final message %d with final fp", panel, final.messageID)
 	}
 }
 
@@ -1402,15 +1429,15 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.deletes) != 0 {
-		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != summaryID {
+		t.Fatalf("deletes = %#v, want terminal status card %d removed", sender.deletes, summaryID)
 	}
-	if len(sender.edits) != 1 {
-		t.Fatalf("edits = %#v, want one in-place Final edit", sender.edits)
+	if len(sender.edits) != 0 || len(sender.messages) != 2 {
+		t.Fatalf("messages = %#v edits = %#v, want one new Final card", sender.messages, sender.edits)
 	}
-	finalEdit := sender.edits[0]
-	if finalEdit.messageID != summaryID || !hasHeaderKind(finalEdit.text, "Final") {
-		t.Fatalf("final edit = %#v, want Final on message %d", finalEdit, summaryID)
+	finalEdit := sender.messages[1]
+	if finalEdit.messageID == summaryID || !hasHeaderKind(finalEdit.text, "Final") || finalEdit.options.Silent {
+		t.Fatalf("final = %#v, want a new notifying Final card", finalEdit)
 	}
 	if strings.Contains(finalEdit.text, "[commentary]") || strings.Contains(finalEdit.text, "Completed commentary should stay in Details.") {
 		t.Fatalf("final edit = %q, want final answer only", finalEdit.text)
@@ -1419,7 +1446,7 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.LastFinalNoticeFP != "final-terminal-run-notice-fp" || panel.SummaryMessageID != summaryID {
+	if panel == nil || panel.LastFinalNoticeFP != "final-terminal-run-notice-fp" || panel.SummaryMessageID != finalEdit.messageID {
 		t.Fatalf("panel = %#v, want final fingerprint recorded", panel)
 	}
 }
@@ -2649,18 +2676,15 @@ func TestTerminalSyncAdoptsActivePanelWithoutTurnID(t *testing.T) {
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "global_observer")
 
-	if len(sender.messages) != 1 || len(sender.edits) != 1 {
-		t.Fatalf("messages=%#v edits=%#v, want one in-place Final edit and one terminal notice", sender.messages, sender.edits)
+	if len(sender.messages) != 1 || len(sender.edits) != 0 {
+		t.Fatalf("messages=%#v edits=%#v, want one new Final card", sender.messages, sender.edits)
 	}
-	if sender.messages[0].options.Silent || !strings.Contains(sender.messages[0].text, "<b>Adopt turn</b> 已完成") {
-		t.Fatalf("terminal notice=%#v, want audible completion", sender.messages[0])
+	final := sender.messages[0]
+	if !hasHeaderKind(final.text, "Final") || final.options.Silent {
+		t.Fatalf("final = %#v, want a notifying Final card", final)
 	}
-	final := sender.edits[0]
-	if final.messageID != 101 || !hasHeaderKind(final.text, "Final") {
-		t.Fatalf("final = %#v, want Final on message 101", final)
-	}
-	if len(sender.deletes) != 0 {
-		t.Fatalf("deletes = %#v, want no delete/re-send transition", sender.deletes)
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != 101 {
+		t.Fatalf("deletes = %#v, want adopted Working card 101 removed", sender.deletes)
 	}
 }
 

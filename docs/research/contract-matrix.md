@@ -11,10 +11,10 @@ This file now serves two purposes:
 ## Commands
 
 - `/start`
-- `/home`
+- `/h`
 - `/help`
 - `/inbox`
-- `/threads`
+- `/t`
 - `/projects`
 - `/show <thread>`
 - `/bind <thread>`
@@ -26,10 +26,11 @@ This file now serves two purposes:
 - `/settings`
 - `/model`
 - `/effort`
-- `/new <project-key-or-number> <prompt>`
-- `/newchat <prompt>`
-- `/newthread <prompt>`
-- `/newchat` or `/newthread`, followed by a plain-text title and then a distinct text-or-photo prompt; `/cancel` aborts either pending stage
+- `/m`
+- `/sm`
+- `/speed`
+- `/new <prompt>`
+- `/new`, followed by a plain-text title and then a distinct text-or-photo prompt; `/cancel` aborts either pending stage
 - `/context`
 - `/whereami`
 - `/observe all|off`
@@ -42,6 +43,10 @@ This file now serves two purposes:
 
 ## Aliases and adjacent commands
 
+- `/home` is a compatibility alias of `/h`
+- `/threads` is a compatibility alias of `/t`
+- `/newchat` is a compatibility alias of `/new`
+- `/newthread` remains a hidden no-Chat-folder compatibility route
 - `/whereami` is an alias of `/context`
 - `/models` is an alias of `/model`
 - `/reasoning` and `/reasoning_effort` are aliases of `/effort`
@@ -110,14 +115,19 @@ Scheduled tasks:
   is rejected because every occurrence must start with isolated conversation state
 - the daemon evaluates local-time schedules every 15 seconds and durably claims
   a task/time-slot in SQLite before dispatch
+- supported RRULE frequencies are `HOURLY`, `DAILY`, `WEEKLY`, and `MONTHLY`;
+  monthly rules accept `BYMONTHDAY=1..31` and skip missing calendar days
 - each due occurrence becomes a new thread and turn in the Telegram-private App
-  Server using the saved prompt, model, reasoning effort, and optional cwd
+  Server using the saved prompt and optional cwd plus the shared SQLite-backed
+  `/model`, `/effort`, and `/speed` settings; task-local model fields are ignored
 - a successful task-management MCP completion records the source thread id and
   title without changing the task's scheduling update boundary
 - scheduled threads do not replace the current Telegram binding or enter normal
   observer, Home, inbox, or activity-card surfaces
 - terminal and input-required states emit one unified-push notification with
   the task name and owning conversation title
+- an exact successful final response of `DONT_NOTIFY` records completion but
+  suppresses the unified push
 - task ids and paths are validated, unknown native TOML fields survive updates,
   and automation prompts must not contain credentials
 
@@ -130,6 +140,8 @@ Notifications:
 - digest examples: low-priority automation summaries or scheduled findings
 - the in-process push service owns Telegram target resolution, message shaping,
   severity, and durable idempotency for both scheduled results and external alerts
+- push idempotency is claimed before Telegram delivery, so an ambiguous timeout
+  is not replayed as a duplicate notification
 - the optional `POST /v1/push` adapter is disabled by default, requires a
   separate Bearer Token, rejects caller-supplied Telegram destinations and
   formatting controls, and must bind an explicit non-wildcard address
@@ -157,41 +169,53 @@ Adapter routing:
   separate default messages.
 - The first four seconds use `typing`; surviving turns create one Working card,
   and active edits have a four-second minimum interval.
-- Final, failure, cancellation, and input-required states edit the same activity
-  card. Long final content may continue in separate `Codex · 结果` messages.
+- Input-required states edit the same activity card. Final, failure, and
+  cancellation send a new normally notifying terminal card, persist it as the
+  panel summary, then delete the Working card best-effort. Long final content
+  may continue in silent `Codex · 结果` messages.
+- Multi-paragraph final content that fits the card uses its first paragraph as
+  the visible summary and keeps the complete answer in the expandable block.
 - Plan Mode / waiting-input states keep the summary card routeable.
 - Plan buttons are structured-only: they come from Codex
   `choices/options/suggestions/responses`, never from bridge heuristics.
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - If a thread remains in Plan Mode, `退出 Plan` on the Plan Final Card and `/stop <thread>` set a one-shot local reset; the next ordinary Telegram-originated `turn/start` for that thread uses `collaborationMode.mode = default` and then clears the reset.
-- `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
-- After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
+- `/m` reports the current SQLite-backed model and reasoning effort without buttons.
+- `/sm` first presents App Server models, then edits the same message to present only the selected model's supported reasoning efforts.
+- `/model` and `/effort` remain compatible standalone button menus backed by the same SQLite daemon state for every future Telegram conversation turn and scheduled run.
+- `/speed` presents `normal` and `fast`, persists the choice in the same SQLite daemon state, and maps it to `turn/start.serviceTierForTurn` as `default` or `fast` for every future conversation turn and scheduled run.
+- After a model, reasoning-effort, or speed selection, the edited settings message removes inline choice buttons.
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
 - `/projects` buttons show meaningful labels (`N. Project name`, `Chat N. Thread name`); internal project keys are not rendered in the menu, and project rows show `last thread:`.
 - Cached threads under generic `Documents/Codex` paths or the configured `CTR_GO_CODEX_CHATS_ROOT` are treated as single-thread `Chats`; selecting a Chat opens and binds that thread and does not offer project `New thread`.
 - `New thread` creates a one-shot state; the next text or Telegram-photo message starts a new App Server thread in the selected project cwd and uses its structured inputs as the first prompt.
-- `/newchat <prompt>` creates a dated Chat folder under the configured Chats root, calls App Server `thread/start` with that cwd, and uses the prompt as the first turn.
-- `/newthread <prompt>` starts a new App Server thread without a Telegram-selected cwd parameter and uses the prompt as the first turn. It must not create a Chat folder; App Server may still attach the daemon default cwd.
-- When either command omits `<prompt>`, the bridge persists a 15-minute chat/topic-scoped title-then-prompt state. The first plain-text message supplies an explicit App Server title and the second supplies the first turn prompt, including an optional Telegram `localImage`; a photo while the title is pending is not routed elsewhere. `/cancel` clears either stage, and restart does not lose it.
+- `/new <prompt>` creates a dated Chat folder under the configured Chats root, calls App Server `thread/start` with that cwd, and uses the prompt as the first turn.
+- `/new` without a prompt persists a 15-minute chat/topic-scoped title-then-prompt state. The first plain-text message supplies an explicit App Server title and the second supplies the first turn prompt, including an optional Telegram `localImage`; a photo while the title is pending is not routed elsewhere. `/cancel` clears either stage, and restart does not lose it.
+- `/newchat` keeps the same Chat-folder behavior and `/newthread` keeps the no-Telegram-selected-cwd behavior as hidden compatibility routes.
 - `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.
-- `/bind` and `在 TG 中继续` load and retain the Telegram live writer with
+- `/bind` loads and retains the Telegram live writer with
   `thread/resume`; binding also changes the foreground session. Observer-only
   tracking remains read-only.
 - Bound writers are reacquired after repair/restart unless a persisted manual-release marker is present.
 - Explicit Telegram input resumes its target just before the write. An active-writer conflict from another connection in the isolated Telegram runtime is returned immediately; the input is not queued and no parallel turn is started.
-- `/release` and `释放空闲写入权` fail closed while any thread owned by the current Telegram live-session generation is active, waiting, or unverifiable. When all are idle they persist manual-release markers and replace only the live session; polling remains connected and cards return to `在 TG 中继续`.
+- `/release` fails closed while any thread owned by the current Telegram live-session generation is active, waiting, or unverifiable. When all are idle it persists manual-release markers and replaces only the live session; polling remains connected.
 - Five minutes without an allowed Telegram message or callback invokes that same fail-closed session release. Allowed Telegram activity resets the timer, including when it races with an automatic release check.
 - Activity cards carry visual identity. The leading emoji is the stable
   conversation marker, followed by Codex and a textual state; short `T:`/`R:`
   ids are low-weight bottom metadata.
 - Emoji markers are identity hints, not state icons; route correctness remains
   based on DB message routes and callback tokens.
-- Full `thread_id` and `turn_id` are exposed through `/context` and the
-  `查看会话 ID` summary/final action; compact `T:`/`R:` chips are not routing authority.
-- `/title` marks its value as user-owned, so automatic runtime refreshes cannot
-  replace it. `/archive` blocks active/input-waiting sessions and requires
+- Full `thread_id` is exposed through `/context`; compact `T:`/`R:` chips are not
+  routing authority. Full-id buttons are not part of compact activity cards.
+- The runtime thread picker counts pages after internal and scheduled-task
+  execution threads are filtered, filling up to five visible sessions across
+  raw App Server cursors and suppressing navigation to an empty trailing page.
+- `/c`, `/a`, and `/un` are the compact primary routes for `/current`,
+  `/archive`, and `/unarchive`; the long forms remain routeable compatibility
+  aliases. `/title` marks its value as user-owned, so automatic runtime refreshes
+  cannot replace it. Archive blocks active/input-waiting sessions and requires
   confirmation only for an archivable session. Restore success offers a switch action.
 - On Windows with affected App Server versions, codex-tg tracks resumed threads
   in the current live generation. Archiving one recycles that generation only
@@ -203,6 +227,9 @@ Adapter routing:
 - Telegram photos on routed threads or as a pending new thread's first prompt
   use the largest available size and App Server `localImage`; they do not create
   a separate receipt card.
+- Photo updates sharing a `media_group_id` are buffered for a short quiet
+  window and submitted once with their shared caption and all images in message
+  order. They must not become one initial turn plus late image steers.
 - Private Telegram photo inputs remain readable for 30 minutes after dispatch
   because App Server ingestion may be asynchronous; scheduled cleanup removes
   them, and matching files older than 24 hours are treated as stale.
@@ -250,7 +277,9 @@ Target v2 callback surface:
 - `bind_here`
 - `stop_turn`
 - `steer_turn`
-- `get_full_log`
+- `threads_shortcut`
+- `threads_page`
+- `get_full_log` (legacy-card compatibility only)
 - `answer_choice`
 - `observe_all`
 - `observe_off`
@@ -259,6 +288,8 @@ Target v2 callback surface:
 - `settings_reasoning_menu`
 - `settings_model_set`
 - `settings_reasoning_set`
+- `settings_speed_menu`
+- `settings_speed_set`
 - `get_thread_id`
 - `turn_off_plan`
 
@@ -317,7 +348,7 @@ Observer/UI v2 presentation contract:
 - summary-panel update:
   - carries project/thread source markers
   - owns live run status while active
-  - carries action buttons such as `Stop` and `Steer`
+  - carries only `Stop`, `Steer`, and `Switch thread` actions
   - is sent silently and deleted best-effort after finalization
 - tool/output message:
   - carries source markers
@@ -325,7 +356,7 @@ Observer/UI v2 presentation contract:
   - is deleted best-effort after finalization
 - final-answer message:
   - carries source markers
-  - carries on-demand `Получить полный лог`
+  - carries only `Details` and `Switch thread` actions
   - is sent as a new message with a normal Telegram notification
   - becomes the panel summary message id for Details/Back callbacks
   - contains final answer/status without replaying completed commentary/tool/output transcript

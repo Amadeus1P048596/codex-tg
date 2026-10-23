@@ -9,9 +9,11 @@
 - `/observe all` moves the global observer target to the current chat/topic.
 - `/observe off` disables global background monitoring.
 - Observer state is rendered through a summary panel keyed by `(chat, project, thread)`.
-- The summary panel is the only background message that carries thread actions such as `Stop` and `Steer`.
+- The summary panel is the only background message that carries thread actions:
+  `Stop`, `Steer`, and `Switch thread`.
 - Tool/output stream messages are informational only and must not carry buttons.
-- Final answers are delivered as separate messages and expose on-demand log retrieval through `Получить полный лог`.
+- Completed cards expose only `Details` and `Switch thread`. Full-log callbacks
+  remain compatibility behavior for older cards rather than a primary action.
 
 ## Consequences
 

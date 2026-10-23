@@ -14,7 +14,7 @@ that thread starts with App Server Default Mode and then the reset is cleared.
 - Telegram-started Plan turns pass Codex App Server `collaborationMode: plan` instead of relying on prompt text.
 - `Turn off Plan` and `/stop` do not start a turn; they only arm the next ordinary `turn/start` with `collaborationMode: default`.
 - The one-shot Default reset is cleared after a successful ordinary `turn/start`; if that start fails, the reset remains.
-- `/model` and `/effort` expose button menus for the model settings used by Telegram-started collaboration-mode turns.
+- `/m` reports and `/sm` edits the runtime-wide settings also used by ordinary Telegram turns and scheduled runs; `/model` and `/effort` remain compatible standalone menus.
 - The activity card is routeable to the exact thread and turn.
 - Replying to the card sends the answer back to the same Codex run.
 - Buttons appear only when Codex provides structured choices.

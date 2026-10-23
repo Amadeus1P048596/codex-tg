@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/automation"
+	"github.com/mideco-tech/codex-tg/internal/codexruntime"
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/telegram"
@@ -67,12 +68,14 @@ func runWithIO(args []string, in io.Reader, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		cfg = inspectManagedCodexRuntime(cfg)
 		return runStatus(cfg, out)
 	case "doctor":
 		cfg, err := config.Load()
 		if err != nil {
 			return err
 		}
+		cfg = inspectManagedCodexRuntime(cfg)
 		return runDoctor(cfg, out)
 	case "repair":
 		cfg, err := config.Load()
@@ -80,6 +83,12 @@ func runWithIO(args []string, in io.Reader, out io.Writer) error {
 			return err
 		}
 		return runRepair(cfg, out)
+	case "runtime":
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		return runRuntime(args[1:], cfg, out)
 	case "version":
 		_, _ = fmt.Fprintf(out, "ctr-go v%s\n", version.Version)
 		return nil
@@ -91,34 +100,177 @@ func runWithIO(args []string, in io.Reader, out io.Writer) error {
 	}
 }
 
+func runRuntime(args []string, cfg config.Config, out io.Writer) error {
+	if !cfg.ManagedCodexRuntime {
+		return errors.New("managed Codex runtime is disabled")
+	}
+	if len(args) != 1 {
+		return errors.New("usage: ctr-go runtime status|sync|rollback")
+	}
+	manager := codexruntime.New(cfg.CodexRuntimeDir, codexruntime.DefaultSourceRoots())
+	var (
+		result codexruntime.Result
+		err    error
+	)
+	switch args[0] {
+	case "status":
+		result, err = manager.Current()
+	case "sync":
+		result, err = manager.Sync(cfg.CodexBin)
+	case "rollback":
+		result, err = manager.Rollback()
+	default:
+		return errors.New("usage: ctr-go runtime status|sync|rollback")
+	}
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "Codex runtime: %s\n", result.Path)
+	_, _ = fmt.Fprintf(out, "Version: %s\n", result.Version)
+	_, _ = fmt.Fprintf(out, "Confirmed: %t\n", !result.NeedsValidation)
+	if result.PreviousPath != "" {
+		_, _ = fmt.Fprintf(out, "Previous: %s\n", result.PreviousPath)
+	}
+	return nil
+}
+
 func runDaemon(cfg config.Config) error {
 	if strings.TrimSpace(cfg.TelegramBotToken) == "" {
 		return errors.New("CTR_GO_TELEGRAM_BOT_TOKEN or CTR_TELEGRAM_BOT_TOKEN must be set")
+	}
+	configuredCodexBin := cfg.CodexBin
+	var runtimeManager *codexruntime.Manager
+	var runtimeResult codexruntime.Result
+	if cfg.ManagedCodexRuntime {
+		runtimeManager = codexruntime.New(cfg.CodexRuntimeDir, codexruntime.DefaultSourceRoots())
+		resolved, err := runtimeManager.Ensure(configuredCodexBin)
+		if err != nil {
+			return fmt.Errorf("prepare managed Codex runtime: %w", err)
+		}
+		runtimeResult = resolved
+		cfg.CodexBin = resolved.Path
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	logger := daemonLogger(cfg)
-	service, err := daemon.New(cfg)
-	if err != nil {
-		return err
-	}
-	defer service.Close()
-	service.SetLogger(diagnosticLogger(cfg, logger))
+	for attempt := 0; attempt < 2; attempt++ {
+		service, err := daemon.New(cfg)
+		if err != nil {
+			return err
+		}
+		service.SetLogger(diagnosticLogger(cfg, logger))
 
-	bot, err := telegram.NewBot(cfg, service, logger)
-	if err != nil {
+		bot, err := telegram.NewBot(cfg, service, logger)
+		if err != nil {
+			_ = service.Close()
+			return err
+		}
+		service.SetSender(bot)
+		if err := service.Start(ctx); err != nil {
+			_ = service.Close()
+			return err
+		}
+		if runtimeManager != nil && runtimeResult.NeedsValidation {
+			if !waitForAppServers(ctx, service, runtimeValidationTimeout(cfg.RequestTimeout)) {
+				_ = service.Close()
+				if attempt > 0 || strings.TrimSpace(runtimeResult.PreviousPath) == "" {
+					return fmt.Errorf("managed Codex runtime %s did not connect both App Server sessions", runtimeResult.Version)
+				}
+				rolledBack, rollbackErr := runtimeManager.Rollback()
+				if rollbackErr != nil {
+					return fmt.Errorf("managed Codex runtime validation failed and rollback failed: %w", rollbackErr)
+				}
+				logger.Printf("managed Codex runtime validation failed; rolled back to previous version")
+				runtimeResult = rolledBack
+				cfg.CodexBin = rolledBack.Path
+				continue
+			}
+			if err := runtimeManager.Confirm(runtimeResult.Version); err != nil {
+				_ = service.Close()
+				return fmt.Errorf("confirm managed Codex runtime: %w", err)
+			}
+			runtimeResult.NeedsValidation = false
+		}
+		if err := bot.Start(ctx); err != nil {
+			_ = service.Close()
+			return err
+		}
+		if runtimeManager != nil {
+			go syncManagedCodexRuntime(ctx, runtimeManager, configuredCodexBin, cfg.CodexRuntimeSyncInterval, logger)
+		}
+		logger.Printf("ctr-go daemon running with %s", bot.String())
+		err = bot.Run(ctx)
+		_ = service.Close()
 		return err
 	}
-	service.SetSender(bot)
-	if err := service.Start(ctx); err != nil {
-		return err
+	return errors.New("managed Codex runtime startup attempts exhausted")
+}
+
+func inspectManagedCodexRuntime(cfg config.Config) config.Config {
+	if !cfg.ManagedCodexRuntime {
+		return cfg
 	}
-	if err := bot.Start(ctx); err != nil {
-		return err
+	manager := codexruntime.New(cfg.CodexRuntimeDir, codexruntime.DefaultSourceRoots())
+	if current, err := manager.Current(); err == nil {
+		cfg.CodexBin = current.Path
 	}
-	logger.Printf("ctr-go daemon running with %s", bot.String())
-	return bot.Run(ctx)
+	return cfg
+}
+
+func runtimeValidationTimeout(requestTimeout time.Duration) time.Duration {
+	timeout := 2*requestTimeout + 10*time.Second
+	if timeout < 30*time.Second {
+		return 30 * time.Second
+	}
+	if timeout > 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return timeout
+}
+
+func waitForAppServers(ctx context.Context, service *daemon.Service, timeout time.Duration) bool {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if service.AppServersConnected() {
+			return true
+		}
+		select {
+		case <-waitCtx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func syncManagedCodexRuntime(ctx context.Context, manager *codexruntime.Manager, configured string, interval time.Duration, logger *log.Logger) {
+	if interval <= 0 {
+		return
+	}
+	sync := func() {
+		result, err := manager.Sync(configured)
+		if err != nil {
+			logger.Printf("managed Codex runtime sync failed: %s", err)
+			return
+		}
+		if result.Promoted {
+			logger.Printf("managed Codex runtime staged for next restart: %s", result.Version)
+		}
+	}
+	sync()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sync()
+		}
+	}
 }
 
 func daemonLogger(cfg config.Config) *log.Logger {
@@ -388,6 +540,7 @@ func printUsage(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "  ctr-go status")
 	_, _ = fmt.Fprintln(out, "  ctr-go doctor")
 	_, _ = fmt.Fprintln(out, "  ctr-go repair")
+	_, _ = fmt.Fprintln(out, "  ctr-go runtime status|sync|rollback")
 	_, _ = fmt.Fprintln(out, "  ctr-go version")
 }
 

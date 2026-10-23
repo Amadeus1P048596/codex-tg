@@ -492,6 +492,15 @@ func turnStartInputParams(threadID string, inputs []control.UserInput, cwd strin
 	if strings.TrimSpace(cwd) != "" {
 		params["cwd"] = cwd
 	}
+	switch strings.ToLower(strings.TrimSpace(options.Speed)) {
+	case "":
+	case "normal":
+		params["serviceTierForTurn"] = "default"
+	case "fast":
+		params["serviceTierForTurn"] = "fast"
+	default:
+		return nil, fmt.Errorf("unsupported Codex speed %q", options.Speed)
+	}
 	mode := normalizeCollaborationMode(options.CollaborationMode)
 	if mode != "" {
 		model := strings.TrimSpace(options.Model)
@@ -539,6 +548,7 @@ func (c *Client) resolveTurnStartOptions(ctx context.Context, options TurnStartO
 	options.CollaborationMode = normalizeCollaborationMode(options.CollaborationMode)
 	options.Model = strings.TrimSpace(options.Model)
 	options.ReasoningEffort = normalizeReasoningEffort(options.ReasoningEffort)
+	options.Speed = strings.ToLower(strings.TrimSpace(options.Speed))
 	if options.CollaborationMode == "" {
 		return options, nil
 	}
@@ -891,12 +901,14 @@ func (c *Client) buildCommand() (*exec.Cmd, error) {
 			cmd := exec.Command(os.Getenv("ComSpec"), "/d", "/c", command)
 			cmd.Dir = c.cwd
 			cmd.Env = appServerEnvironment(c.codexHome)
+			configureHiddenProcess(cmd)
 			return cmd, nil
 		}
 	}
 	cmd := exec.Command(executable, args...)
 	cmd.Dir = c.cwd
 	cmd.Env = appServerEnvironment(c.codexHome)
+	configureHiddenProcess(cmd)
 	return cmd, nil
 }
 

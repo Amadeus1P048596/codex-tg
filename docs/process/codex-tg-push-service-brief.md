@@ -66,6 +66,8 @@ The HTTP listener is disabled unless explicitly configured. When enabled it:
 - does not accept a Telegram chat id, Bot Token, parse mode, URL, or file path;
 - routes through the configured codex-tg observer target;
 - returns a duplicate-safe success for a repeated idempotency key;
+- claims the idempotency key before Telegram delivery so an ambiguous timeout
+  is not replayed as a duplicate notification;
 - logs metadata only, never the request body or authorization value.
 
 ## Tests
@@ -77,6 +79,8 @@ The HTTP listener is disabled unless explicitly configured. When enabled it:
 - `failed_runs_only` suppresses a successful scheduled notification.
 - The HTTP adapter rejects missing/incorrect authorization and oversized or
   invalid requests, and accepts a valid request once.
+- An ambiguous Telegram delivery failure remains durably claimed, and a retry
+  with the same idempotency key does not send the notification again.
 - Bank-gold tests prove the generic request contract and that Telegram
   credentials are no longer required when push-service credentials exist.
 

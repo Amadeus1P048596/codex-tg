@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const toolDescription = "Manage Scheduled tasks owned and executed by codex-tg. Use this for recurring tasks, reminders, monitoring, or scheduled follow-ups requested from Telegram. Telegram and Codex Desktop use isolated task stores and sessions, so this integration creates standalone cron tasks only; heartbeat tasks cannot target Telegram threads. Each due run uses a hidden background thread in the Telegram-private Codex runtime, then sends one standalone result through the codex-tg push service with the owning conversation title. Prefer updating an existing task over creating a duplicate. Times are local wall-clock times. Never put credentials or secrets in an automation prompt."
+const toolDescription = "Manage Scheduled tasks owned and executed by codex-tg. Use this for recurring tasks, reminders, monitoring, or scheduled follow-ups requested from Telegram. Telegram and Codex Desktop use isolated task stores and sessions, so this integration creates standalone cron tasks only; heartbeat tasks cannot target Telegram threads. Each due run uses a hidden background thread in the Telegram-private Codex runtime and inherits the shared /model and /effort settings, then sends one standalone result through the codex-tg push service with the owning conversation title. A completed run whose entire final response is DONT_NOTIFY is recorded without sending a Telegram message. Prefer updating an existing task over creating a duplicate. Times are local wall-clock times. Never put credentials or secrets in an automation prompt."
 
 func ServeMCP(in io.Reader, out io.Writer, store *Store) error {
 	scanner := bufio.NewScanner(in)
@@ -95,7 +95,7 @@ func automationToolSpec() map[string]any {
 			"type": "string", "description": "Self-contained task prompt only. Do not include the schedule or credentials.",
 		},
 		"rrule": map[string]any{
-			"type": "string", "description": "Local-time RRULE without DTSTART. Supported FREQ values are HOURLY, DAILY, and WEEKLY.",
+			"type": "string", "description": "Local-time RRULE without DTSTART. Supported FREQ values are HOURLY, DAILY, WEEKLY, and MONTHLY. MONTHLY accepts BYMONTHDAY=1..31; a missing calendar day is skipped.",
 		},
 		"status": map[string]any{
 			"type": "string", "enum": []string{"ACTIVE", "PAUSED"},
@@ -109,12 +109,6 @@ func automationToolSpec() map[string]any {
 		"projectId": map[string]any{
 			"anyOf":       []any{map[string]any{"type": "string", "minLength": 1}, map[string]any{"type": "null"}},
 			"description": "Compatibility field. Use null unless migrating an older task; cwd controls the Telegram run directory.",
-		},
-		"model": map[string]any{
-			"type": "string", "description": "Model for scheduled runs. Omit on update to preserve the existing model.",
-		},
-		"reasoningEffort": map[string]any{
-			"type": "string", "enum": []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
 		},
 		"notificationPolicy": map[string]any{
 			"anyOf":       []any{map[string]any{"type": "string", "const": "failed_runs_only"}, map[string]any{"type": "null"}},
@@ -145,7 +139,7 @@ func automationToolSpec() map[string]any {
 			"oneOf": []any{
 				branch("list"),
 				branch("view", "id"),
-				branch("create", "name", "prompt", "rrule", "status", "kind", "projectId", "model", "reasoningEffort", "executionEnvironment"),
+				branch("create", "name", "prompt", "rrule", "status", "kind", "projectId", "executionEnvironment"),
 				branch("update", "id"),
 				branch("delete", "id"),
 			},

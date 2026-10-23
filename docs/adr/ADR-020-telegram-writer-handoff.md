@@ -39,7 +39,7 @@ writer-handoff primitive for the spawned stdio process.
   or start a parallel turn.
 - The daemon records thread ids successfully acquired by the current live App
   Server generation.
-- `/release` and the `释放空闲写入权` session-card button validate every recorded thread through the authoritative live App
+- `/release` validates every recorded thread through the authoritative live App
   Server. If any is active, waiting, or unverifiable, it fails closed. Otherwise
   it replaces only the live App Server session and clears the generation-local
   ownership set. The read-only poll session remains connected.
@@ -60,8 +60,8 @@ writer-handoff primitive for the spawned stdio process.
   memory may use a separate application-level store. Neither mechanism shares
   conversation or writer state.
 - Binding implies Telegram ownership; observing without binding does not.
-- While the live App Server has loaded a thread, summary and Final cards show
-  `释放空闲写入权` instead of `在 TG 中继续`.
+- Writer acquisition and release remain available through explicit commands and
+  input routing, but are no longer normal activity-card actions.
 - After five minutes without an allowed Telegram message or button action, the
   daemon runs the same fail-closed, live-session-wide release used by
   `/release`. Active, pending, or unverifiable threads defer release; new

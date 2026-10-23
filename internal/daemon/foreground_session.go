@@ -20,10 +20,6 @@ func backgroundThreadNoticeStateKey(chatID, topicID int64, threadID string) stri
 	return "ui.background_notice." + model.ChatKey(chatID, topicID) + "." + strings.TrimSpace(threadID)
 }
 
-func foregroundThreadNoticeStateKey(chatID, topicID int64, threadID string) string {
-	return "ui.foreground_terminal_notice." + model.ChatKey(chatID, topicID) + "." + strings.TrimSpace(threadID)
-}
-
 func (s *Service) foregroundThreadID(ctx context.Context, chatID, topicID int64) (string, error) {
 	value, err := s.store.GetState(ctx, foregroundThreadStateKey(chatID, topicID))
 	if err != nil {
@@ -63,6 +59,9 @@ func (s *Service) activateForegroundThread(ctx context.Context, target model.Obs
 		return err
 	}
 	if current != "" && current != threadID {
+		if err := s.acknowledgeTerminalThreadBeforeSwitchLocked(ctx, target, current); err != nil {
+			return err
+		}
 		s.hideForegroundWorkingCardLocked(ctx, target, current)
 	}
 	if err := s.store.SetState(ctx, foregroundThreadStateKey(target.ChatID, target.TopicID), threadID); err != nil {
@@ -77,6 +76,22 @@ func (s *Service) activateForegroundThread(ctx context.Context, target model.Obs
 		}
 	}
 	return nil
+}
+
+func (s *Service) acknowledgeTerminalThreadBeforeSwitchLocked(ctx context.Context, target model.ObserverTarget, threadID string) error {
+	thread, snapshot, err := s.loadThreadPanelSnapshot(ctx, threadID)
+	if err != nil || thread == nil || snapshot == nil {
+		return err
+	}
+	state := notificationStateForStatus(readableStatus(snapshot.LatestTurnStatus, thread.Status), false)
+	if !notificationStateIsTerminal(state) {
+		return nil
+	}
+	fingerprint := backgroundThreadSnapshotFingerprint(thread.ID, snapshot, state, nil)
+	if err := s.store.SetState(ctx, backgroundThreadNoticeStateKey(target.ChatID, target.TopicID, thread.ID), fingerprint); err != nil {
+		return err
+	}
+	return s.clearInboxItem(ctx, target.ChatID, target.TopicID, thread.ID)
 }
 
 func (s *Service) hideForegroundWorkingCardLocked(ctx context.Context, target model.ObserverTarget, threadID string) {
@@ -109,16 +124,16 @@ func (s *Service) handleBackgroundThreadSnapshotLocked(ctx context.Context, send
 		_ = s.clearInboxItem(ctx, target.ChatID, target.TopicID, thread.ID)
 		return
 	}
-	fingerprint := hashStrings(thread.ID, snapshot.LatestTurnID, string(state), snapshot.LatestFinalFP, pendingRequestID(pending))
+	fingerprint := backgroundThreadSnapshotFingerprint(thread.ID, snapshot, state, pending)
+	stateKey := backgroundThreadNoticeStateKey(target.ChatID, target.TopicID, thread.ID)
+	if previous, err := s.store.GetState(ctx, stateKey); err == nil && strings.TrimSpace(previous) == fingerprint {
+		return
+	}
 	if err := s.saveInboxItem(ctx, target.ChatID, target.TopicID, sessionInboxItem{
 		ThreadID: thread.ID, TurnID: snapshot.LatestTurnID, Title: threadSelectionTitle(thread),
 		State: state, UpdatedAt: s.currentTime().Unix(), Fingerprint: fingerprint,
 	}); err != nil {
 		s.setError(ctx, fmt.Errorf("persist background session inbox item: %w", err))
-	}
-	stateKey := backgroundThreadNoticeStateKey(target.ChatID, target.TopicID, thread.ID)
-	if previous, err := s.store.GetState(ctx, stateKey); err == nil && strings.TrimSpace(previous) == fingerprint {
-		return
 	}
 	title := threadSelectionTitle(thread)
 	label := backgroundThreadStateLabel(state)
@@ -146,6 +161,13 @@ func (s *Service) handleBackgroundThreadSnapshotLocked(ctx context.Context, send
 	_ = s.store.SetState(ctx, stateKey, fingerprint)
 }
 
+func backgroundThreadSnapshotFingerprint(threadID string, snapshot *appserver.ThreadReadSnapshot, state notificationState, pending *model.PendingApproval) string {
+	if snapshot == nil {
+		return ""
+	}
+	return hashStrings(threadID, snapshot.LatestTurnID, string(state), snapshot.LatestFinalFP, pendingRequestID(pending))
+}
+
 func pendingRequestID(pending *model.PendingApproval) string {
 	if pending == nil {
 		return ""
@@ -166,39 +188,4 @@ func backgroundThreadStateLabel(state notificationState) string {
 	default:
 		return "状态已更新"
 	}
-}
-
-func (s *Service) sendForegroundTerminalNotice(ctx context.Context, sender Sender, target model.ObserverTarget, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) error {
-	if sender == nil || snapshot == nil {
-		return nil
-	}
-	state := notificationStateForStatus(readableStatus(snapshot.LatestTurnStatus, thread.Status), false)
-	if !notificationStateIsTerminal(state) {
-		return nil
-	}
-	fingerprint := hashStrings(thread.ID, snapshot.LatestTurnID, string(state), snapshot.LatestFinalFP)
-	stateKey := foregroundThreadNoticeStateKey(target.ChatID, target.TopicID, thread.ID)
-	if previous, err := s.store.GetState(ctx, stateKey); err == nil && strings.TrimSpace(previous) == fingerprint {
-		return nil
-	}
-	title := threadSelectionTitle(thread)
-	label := backgroundThreadStateLabel(state)
-	message := model.RenderedMessage{
-		Text:      html.EscapeString(s.visualMarker(ctx, thread.ID)) + " <b>" + html.EscapeString(title) + "</b> " + label,
-		ParseMode: "HTML",
-		PlainText: s.visualMarker(ctx, thread.ID) + " " + title + " " + label,
-	}
-	ids, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, nil, notifySendOptions())
-	if err != nil {
-		return fmt.Errorf("send foreground terminal notice: %w", err)
-	}
-	messageID := lastMessageID(ids)
-	if messageID != 0 {
-		_ = s.store.PutMessageRoute(ctx, model.MessageRoute{
-			ChatID: target.ChatID, TopicID: target.TopicID, MessageID: messageID,
-			ThreadID: thread.ID, TurnID: snapshot.LatestTurnID, EventID: "foreground_terminal_notice:" + fingerprint,
-			CreatedAt: model.NowString(),
-		})
-	}
-	return s.store.SetState(ctx, stateKey, fingerprint)
 }

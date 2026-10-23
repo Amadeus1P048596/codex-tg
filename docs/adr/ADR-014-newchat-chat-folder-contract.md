@@ -4,12 +4,20 @@ Status: accepted
 
 Date: 2026-05-05
 
+Amended: 2026-09-01 to make `/new` the compact primary command while retaining
+the previous creation routes for compatibility.
+
 ## Context
 
 `/projects` treats threads under `Documents/Codex` as Codex UI `Chats`. Before this ADR, `/newchat` created an App Server thread without a cwd and only marked it locally as `Chats`, so the result did not match Codex UI Chat folders such as `Documents/Codex/2026-04-28/tool-call`.
 
 ## Decision
 
+- `/new` is the primary Telegram creation command and uses the Chat-folder
+  behavior defined below. `/newchat` remains an equivalent hidden compatibility
+  route, while `/newthread` remains the hidden no-Chat-folder escape hatch.
+- Project-scoped creation stays under `/projects`; `/new` no longer parses a
+  project selector.
 - `/newchat <prompt>` creates a real cwd under `CTR_GO_CODEX_CHATS_ROOT` before calling App Server `thread/start`.
 - The default Chats root is `~/Documents/Codex`; operators may override it with `CTR_GO_CODEX_CHATS_ROOT`.
 - New Chat cwd names are `<root>/<YYYY-MM-DD>/<title-or-prompt-slug>`, with numeric suffixes for collisions.
@@ -21,7 +29,8 @@ Date: 2026-05-05
 
 ## Consequences
 
-- `/projects -> Open Chats` shows `/newchat` threads as real Codex UI Chats.
+- `/projects -> Open Chats` shows `/new` and `/newchat` threads as real Codex UI Chats.
 - No arbitrary filesystem path is accepted from Telegram.
 - Existing no-cwd or default-cwd threads remain supported through `/newthread` and older cached rows.
-- Telegram users can start either flow from the command menu and provide a concise title separately from the full prompt.
+- The compact Telegram command menu exposes only `/new`; compatibility commands
+  remain routeable but do not compete for menu space.

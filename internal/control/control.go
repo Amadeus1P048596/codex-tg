@@ -13,6 +13,7 @@ type TurnStartOptions struct {
 	CollaborationMode string
 	Model             string
 	ReasoningEffort   string
+	Speed             string
 }
 
 type UserInput struct {

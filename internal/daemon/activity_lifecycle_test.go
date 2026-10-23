@@ -66,6 +66,80 @@ func TestWorkingCardWaitsFourSecondsWhileSendingTyping(t *testing.T) {
 	}
 }
 
+func TestPerRunNewTurnCreatesNewCardAfterTypingDelayWhenOldPanelStillActive(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	base := &recordingSender{}
+	sender := &typingRecordingSender{recordingSender: base}
+	service.SetSender(sender)
+	ctx := context.Background()
+	now := time.Date(2026, time.October, 17, 13, 55, 11, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	thread := model.Thread{ID: "thread-new-turn-after-stale-active", Title: "Book search", ProjectName: "Codex", UpdatedAt: now.Unix()}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	oldPanel, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:           123456789,
+		ProjectName:      thread.ProjectName,
+		ThreadID:         thread.ID,
+		SourceMode:       model.PanelSourceGlobalObserver,
+		SummaryMessageID: 101,
+		CurrentTurnID:    "turn-old",
+		Status:           "inProgress",
+		ArchiveEnabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("CreateThreadPanel failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:              thread,
+		LatestTurnID:        "turn-new",
+		LatestTurnStatus:    "inProgress",
+		LatestTurnStartedAt: now.Format(time.RFC3339Nano),
+	}, now)
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot(new turn) failed: %v", err)
+	}
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, Enabled: true}
+
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
+	if len(base.messages) != 0 || len(sender.actions) != 1 {
+		t.Fatalf("messages=%#v actions=%#v, want typing-only grace period", base.messages, sender.actions)
+	}
+
+	now = now.Add(workingCardDelay + time.Millisecond)
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	if len(base.messages) != 1 || len(base.edits) != 0 {
+		t.Fatalf("messages=%#v edits=%#v, want a new Working card instead of editing stale message 101", base.messages, base.edits)
+	}
+	newMessageID := base.messages[0].messageID
+	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
+	}
+	if panel == nil || panel.ID == oldPanel.ID || panel.CurrentTurnID != "turn-new" || panel.SummaryMessageID != newMessageID {
+		t.Fatalf("panel=%#v, want a new current panel for turn-new and message %d", panel, newMessageID)
+	}
+
+	completed := appserver.CompactSnapshot(&snapshot, appserver.ThreadReadSnapshot{
+		Thread: thread, LatestTurnID: "turn-new", LatestTurnStatus: "completed",
+		LatestFinalFP: "turn-new-final", LatestFinalText: "Found the requested book.",
+	}, now.Add(time.Second))
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, completed); err != nil {
+		t.Fatalf("UpsertSnapshot(completed) failed: %v", err)
+	}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	if len(base.edits) != 0 || len(base.messages) != 2 || !hasHeaderKind(base.messages[1].text, "Final") {
+		t.Fatalf("messages=%#v edits=%#v, want a new final result card", base.messages, base.edits)
+	}
+	if len(base.deletes) != 1 || base.deletes[0].messageID != newMessageID || base.deletes[0].messageID == 101 {
+		t.Fatalf("deletes=%#v, want only the new turn's Working card %d removed", base.deletes, newMessageID)
+	}
+}
+
 func TestWorkingCardFallsBackToMessageWhenTypingFails(t *testing.T) {
 	t.Parallel()
 
@@ -141,7 +215,7 @@ func TestWorkingCardActivityEditsAreThrottled(t *testing.T) {
 	}
 }
 
-func TestLongFinalCompletesWorkingCardThenSendsFullResult(t *testing.T) {
+func TestLongFinalReplacesWorkingCardThenSendsFullResult(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -174,18 +248,24 @@ func TestLongFinalCompletesWorkingCardThenSendsFullResult(t *testing.T) {
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
 
-	if len(sender.edits) != 1 || sender.edits[0].messageID != workingID || !strings.Contains(sender.edits[0].text, "<b>已完成</b>") {
-		t.Fatalf("edits=%#v, want Working card completed in place", sender.edits)
+	if len(sender.edits) != 0 {
+		t.Fatalf("edits=%#v, want terminal result sent as a new message", sender.edits)
 	}
-	if len(sender.messages) < 2 || !strings.Contains(sender.messages[1].text, "Codex · 结果") {
-		t.Fatalf("messages=%#v, want separate full result after the original Working card", sender.messages)
+	if len(sender.messages) < 3 || !hasHeaderKind(sender.messages[1].text, "Final") || !strings.Contains(sender.messages[2].text, "Codex · 结果") {
+		t.Fatalf("messages=%#v, want a new Final card followed by the full result", sender.messages)
 	}
-	if len(sender.deletes) != 0 {
-		t.Fatalf("deletes=%#v, want continuous message lifecycle", sender.deletes)
+	if sender.messages[1].options.Silent {
+		t.Fatalf("final options=%#v, want a notifying Final card", sender.messages[1].options)
+	}
+	if !sender.messages[2].options.Silent {
+		t.Fatalf("full result options=%#v, want one completion notification only", sender.messages[2].options)
+	}
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != workingID {
+		t.Fatalf("deletes=%#v, want old Working card %d removed", sender.deletes, workingID)
 	}
 }
 
-func TestShortFinalCompletesWorkingCardAndSendsAudibleNotice(t *testing.T) {
+func TestShortFinalReplacesWorkingCardWithNotifyingResult(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -217,19 +297,76 @@ func TestShortFinalCompletesWorkingCardAndSendsAudibleNotice(t *testing.T) {
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
 
-	if len(sender.edits) != 1 || sender.edits[0].messageID != workingID || !strings.Contains(sender.edits[0].text, "<b>已完成</b>") {
-		t.Fatalf("edits=%#v, want Working card completed in place", sender.edits)
+	if len(sender.edits) != 0 {
+		t.Fatalf("edits=%#v, want terminal result sent as a new message", sender.edits)
 	}
-	if len(sender.messages) != 2 {
-		t.Fatalf("messages=%#v, want Working card plus one completion notice", sender.messages)
+	if len(sender.messages) != 2 || !hasHeaderKind(sender.messages[1].text, "Final") || sender.messages[1].options.Silent {
+		t.Fatalf("messages=%#v, want one new notifying Final card", sender.messages)
 	}
-	notice := sender.messages[1]
-	if notice.options.Silent || !strings.Contains(notice.text, "<b>Short final</b> 已完成") {
-		t.Fatalf("completion notice=%#v, want audible titled completion", notice)
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != workingID {
+		t.Fatalf("deletes=%#v, want old Working card %d removed", sender.deletes, workingID)
 	}
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
-	if len(sender.messages) != 2 {
-		t.Fatalf("messages=%#v, want completion notice deduplicated", sender.messages)
+	if len(sender.messages) != 2 || len(sender.deletes) != 1 {
+		t.Fatalf("messages=%#v, want repeated sync to stay silent", sender.messages)
+	}
+}
+
+func TestFinalSendFailureKeepsWorkingCardAndRetries(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	thread := model.Thread{ID: "thread-final-send-retry", Title: "Final retry", ProjectName: "Codex", UpdatedAt: now.Unix()}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, Enabled: true}
+	working := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread: thread, LatestTurnID: "turn-final-send-retry", LatestTurnStatus: "inProgress",
+		LatestTurnStartedAt: now.Add(-10 * time.Second).Format(time.RFC3339Nano),
+	}, now)
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, working); err != nil {
+		t.Fatalf("UpsertSnapshot(working) failed: %v", err)
+	}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	workingID := sender.messages[0].messageID
+
+	completed := appserver.CompactSnapshot(&working, appserver.ThreadReadSnapshot{
+		Thread: thread, LatestTurnID: "turn-final-send-retry", LatestTurnStatus: "completed",
+		LatestFinalFP: "final-send-retry-fp", LatestFinalText: "已完成。",
+	}, now.Add(time.Minute))
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, completed); err != nil {
+		t.Fatalf("UpsertSnapshot(completed) failed: %v", err)
+	}
+	sender.sendErr = errors.New("forced final send failure")
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+
+	if len(sender.deletes) != 0 {
+		t.Fatalf("deletes=%#v, want Working card preserved after final send failure", sender.deletes)
+	}
+	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
+	}
+	if panel == nil || panel.SummaryMessageID != workingID || panel.LastFinalNoticeFP != "" {
+		t.Fatalf("panel=%#v, want retryable Working state on message %d", panel, workingID)
+	}
+
+	sender.sendErr = nil
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceTelegramInput)
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != workingID {
+		t.Fatalf("deletes=%#v, want Working card removed after successful retry", sender.deletes)
+	}
+	panel, err = service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel after retry failed: %v", err)
+	}
+	if panel == nil || panel.SummaryMessageID == workingID || panel.LastFinalNoticeFP != "final-send-retry-fp" {
+		t.Fatalf("panel=%#v, want successful Final card persisted after retry", panel)
 	}
 }

@@ -16,7 +16,7 @@ func TestServeMCPListsAndCallsAutomationTool(t *testing.T) {
 		``,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"automation_update","arguments":{"mode":"create","name":"Morning check","prompt":"Check the project.","rrule":"FREQ=DAILY;BYHOUR=8;BYMINUTE=0","status":"ACTIVE","kind":"cron","projectId":null,"model":"gpt-test","reasoningEffort":"medium","executionEnvironment":"local"}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"automation_update","arguments":{"mode":"create","name":"Morning check","prompt":"Check the project.","rrule":"FREQ=DAILY;BYHOUR=8;BYMINUTE=0","status":"ACTIVE","kind":"cron","projectId":null,"executionEnvironment":"local"}}}`,
 	}
 	var out bytes.Buffer
 	store := NewStore(t.TempDir(), func() time.Time {
@@ -47,6 +47,22 @@ func TestServeMCPListsAndCallsAutomationTool(t *testing.T) {
 	schema := tools[0].(map[string]any)["inputSchema"].(map[string]any)
 	if branches, ok := schema["oneOf"].([]any); !ok || len(branches) != 5 {
 		t.Fatalf("input schema branches = %#v, want 5 operation variants", schema["oneOf"])
+	}
+	createBranch := schema["oneOf"].([]any)[2].(map[string]any)
+	properties := createBranch["properties"].(map[string]any)
+	if _, ok := properties["model"]; ok {
+		t.Fatalf("create schema still exposes task-local model: %#v", properties)
+	}
+	if _, ok := properties["reasoningEffort"]; ok {
+		t.Fatalf("create schema still exposes task-local reasoning effort: %#v", properties)
+	}
+	rruleDescription, _ := properties["rrule"].(map[string]any)["description"].(string)
+	if !strings.Contains(rruleDescription, "MONTHLY") || !strings.Contains(rruleDescription, "BYMONTHDAY") {
+		t.Fatalf("rrule description = %q, want monthly schedule guidance", rruleDescription)
+	}
+	toolDescription, _ := tools[0].(map[string]any)["description"].(string)
+	if !strings.Contains(toolDescription, "DONT_NOTIFY") {
+		t.Fatalf("tool description = %q, want silent-result contract", toolDescription)
 	}
 	callResult := call["result"].(map[string]any)
 	if callResult["isError"] != false {

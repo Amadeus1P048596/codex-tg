@@ -59,6 +59,7 @@ type Chat struct {
 
 type Message struct {
 	MessageID       int64           `json:"message_id"`
+	MediaGroupID    string          `json:"media_group_id,omitempty"`
 	MessageThreadID int64           `json:"message_thread_id,omitempty"`
 	From            *User           `json:"from"`
 	Chat            Chat            `json:"chat"`

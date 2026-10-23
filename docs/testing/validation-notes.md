@@ -1,5 +1,45 @@
 # Validation Notes
 
+- 2026-09-20 CST `/speed` validation generated the stable JSON schema from the
+  configured Telegram-private Codex executable and confirmed
+  `turn/start.serviceTierForTurn`, including `default` for standard speed. The
+  Telegram menu persists `normal` or `fast` in SQLite and maps them to
+  `default` or `fast` for future interactive and scheduled turns. Focused
+  App Server/daemon/Telegram tests, full `go test ./...`, `go build
+  -buildvcs=false ./...`, `go vet ./...`, and `git diff --check` passed. Live
+  Telegram menu/callback readback remains pending an operator-authorized
+  restart.
+
+- 2026-09-10 CST Telegram media-group validation reproduced a captioned album
+  as one initial image turn followed by three late image steers. The bot now
+  decodes `media_group_id`, buffers each chat/topic/sender group through a
+  one-second quiet window, preserves message and reply order, and dispatches the
+  caption plus every largest photo variant in one service call. The focused
+  media-group regression, full `go test ./...`, `go build -buildvcs=false
+  ./...`, and `go vet ./...` passed. The race-enabled test was unavailable
+  because this Windows Go environment has CGO disabled. No daemon restart or
+  live Telegram album mutation was performed.
+
+- 2026-09-06 CST compact model-settings validation added read-only `/m` status
+  and a two-step `/sm` callback flow that selects an App Server model before
+  presenting that model's supported reasoning efforts. Both values reuse the
+  existing SQLite setting pair shared by future Telegram turns and scheduled
+  runs; the standalone settings commands remain compatible. Targeted
+  daemon/Telegram tests, full `go test ./...`, and `go build -buildvcs=false
+  ./...` passed. Live Telegram menu and callback readback remains pending
+  operator-authorized restart.
+
+- 2026-09-06 CST monthly scheduler validation extended the local-time RRULE
+  subset with `FREQ=MONTHLY` and positive `BYMONTHDAY` lists, preserving
+  interval and task-update boundaries while skipping dates absent from a
+  calendar month. Exact successful `DONT_NOTIFY` finals now record completion
+  without entering the unified push path; partial matches and failed runs still
+  notify. Targeted automation/daemon tests, full `go test ./...`, `go build
+  -buildvcs=false ./...`, `git diff --check`, and a targeted private-data scan
+  passed. A Windows candidate was built and the migrated monthly task was read
+  successfully through its MCP adapter. The live daemon was not restarted, so
+  live Telegram readback remains pending operator authorization.
+
 - 2026-08-31 CST unified push validation replaced scheduled-run conversation
   cards with one de-duplicated standalone notification that includes the owning
   conversation title. Scheduler execution threads remain pollable but are
@@ -347,3 +387,18 @@ Acceptance checks:
 - optional daemon log correlation for the scenario window contains no premature interrupted terminal before recovery/expiry, no input rejection, and no `telegram_render_contains_nil`.
 
 Do not commit Telegram user sessions, chat/thread ids, raw message ids, raw logs, env files, or screenshots.
+
+## 2026-10-17 Windows managed Codex runtime
+
+- Added an active/previous private CLI bundle manager for Windows.
+- Unit coverage verifies bootstrap, survival after source deletion, incomplete
+  candidate rejection, non-disruptive promotion, confirmation, rollback, and
+  two-version retention.
+- Windows App Server children and runtime probes use no-window process flags.
+- The local credential watchdog now prefers the managed runtime and its six
+  focused recovery/resolution tests pass; older deployed binaries fall back to
+  the configured executable.
+- `go test ./...`, `go build -buildvcs=false ./...`, `git diff --check`, and
+  repository secret/local-path scans passed.
+- A complete local bundle was staged and byte hashes matched the source. Live
+  cutover remains intentionally pending explicit restart authorization.

@@ -12,21 +12,22 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 
 ## Working Mode
 
-- First understand the current design. Read nearby code, tests, ADRs, and `docs/testing/regression-map.md` when it exists before editing.
-- Do not treat a vague request as enough context. Ask focused questions when requirements, constraints, or tradeoffs are unclear and cannot be discovered safely.
+- First understand the current design. Use the Context Pull Map and inspect only the nearby code, tests, ADRs, and contracts relevant to the requested change before editing.
+- Resolve routine ambiguity from existing context and safe read-only inspection. Ask only when a missing choice would materially change the result, require new authority, or make an action difficult to reverse; otherwise make a reasonable assumption, continue, and disclose it.
 - Prefer small steps: inspect -> plan -> test -> implement -> refactor -> validate.
 - Do not generate large rewrites, broad refactors, or speculative frameworks unless the task explicitly requires them.
 - Build what is needed now. Avoid adding libraries, build tools, abstractions, or cross-platform machinery without an immediate reason.
 - Match the current user's language for working plans, handoffs, and status updates when clear. Public README, wiki, demo, release notes, and GitHub-facing docs may stay English-first.
+- Lead with the outcome and communicate in concise, plain paragraphs. Use lists or headings only when they make the result easier to scan; avoid ornamental formatting and repetition.
 
 ## Agent Workflow Kernel
 
-- Do not start coding vague work. For unclear features, run alignment first: ask focused questions, lock goal, non-goals, UX, data, tests, and acceptance.
-- Feature work needs a destination before implementation: a short issue, feature brief, or equivalent written target.
+- Meaningful or cross-cutting feature work needs a destination before implementation: a short issue, feature brief, or equivalent written target. For a small fix, the user request plus a focused regression test may be the target.
 - Slice vertically. Prefer one small end-to-end behavior over horizontal phases such as storage first, daemon later, UI last.
 - Use TDD for non-trivial behavior changes and bug fixes: failing or updated test, minimal implementation, refactor, targeted checks.
-- Use fresh-context review for meaningful changes. The reviewer should inspect issue/brief, diff, tests, ADR/rules, and validation output, not the implementation chat.
-- Human/live QA remains required for Telegram-facing behavior when a live contour is available.
+- Use an independent fresh-context reviewer for meaningful changes when the current environment and user instructions permit it. Otherwise perform a structured self-review of the issue or brief, diff, tests, ADRs/rules, and validation output, and state that the review was not independent.
+- Do not spawn subagents unless the current environment and user instructions permit it. When permitted, delegate only concrete, bounded, independent work that materially improves latency or quality.
+- Prepare the candidate and validation plan without mutating the live service. Restart the live daemon or send real Telegram QA messages only with explicit current operator authorization.
 - After compaction, context reset, or handoff, reread this file first, then pull only the docs called out by the Context Pull Map.
 
 ## Context Pull Map
@@ -53,6 +54,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - App Server session lifecycle transitions must be serialized and generation-aware; stale old-session close/error events must not invalidate newer sessions or create repair loops.
 - Startup must remain non-blocking; never put full thread sync into synchronous startup.
 - SQLite is the local source of truth for bindings, routes, callbacks, panels, observer target, delivery metadata, and daemon state.
+- Model availability is authoritative only when returned by the configured Telegram-private App Server `model/list`. After a runtime or model change, verify the live and poll executable versions, the model list, and the actual `turn/start` model/effort in logs or readback; configuration files alone are not sufficient evidence.
 - Do not add a second live runtime backbone for App Server state. SDK/MCP may be used only where ADR-019 allows orchestration adapters, and must not replace App Server truth for live UI/control state without a new ADR.
 
 ## Design And Code Principles
@@ -79,19 +81,21 @@ The repo is public-facing. Keep every change safe for open-source publication: n
   `[Tool]`, `[Output]`, empty-output placeholders, or one Telegram message per event.
 - Active card edits have a four-second minimum interval. Needs-input and terminal
   transitions bypass the throttle.
-- Finalization edits the Working card in place. A fast turn sends one terminal
-  card; a long final may continue in separate `Codex · Result` messages.
+- Finalization sends one normally notifying terminal card, persists it as the
+  panel summary, then deletes the old Working card best-effort. A fast turn
+  sends the same terminal card without a replacement step; a long final may
+  continue in silent `Codex · Result` companion messages.
 - The leading emoji is conversation identity, not state. The primary Telegram
   UI uses the Chinese state labels `处理中`, `需要输入`, `已完成`, `失败`, and
   `已取消`; internal protocol state names remain unchanged.
 - `Details` pagination edits the same message; it must not create a stream of replacement pages.
-- `Tools file` and `Get full log` are explicit on-demand exports. Automatic per-tool document spam is forbidden.
+- `Details` is the primary on-demand inspection surface. `Tools file` is available from Details when needed; `get_full_log` exists only for compatibility with legacy cards. Automatic per-tool document spam is forbidden.
 - Document exports should use in-memory multipart upload. Temporary Telegram
   photo inputs must be private, bounded, and removed after App Server accepts them.
 - Plan Mode waiting input uses the routeable activity card. Buttons are allowed
   only for structured choices provided by Codex.
 - Telegram-originated Plan Mode starts must pass App Server `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
-- `/model` and `/effort` are Telegram button menus for collaboration-mode model settings. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
+- `/model`, `/effort`, and `/speed` are Telegram button menus for shared execution settings used by every future Telegram turn and scheduled run. Persist selections in SQLite, not env-only local config. Map `normal`/`fast` speed to App Server's per-turn `default`/`fast` service tier. After a selection, remove the inline choice buttons from the edited message.
 - Replies to active turns should steer the active turn. If steering is rejected while the thread still looks active, do not start a parallel turn.
 - Stale active-turn ghosts are different: if `thread/read` exposes a final answer or `turn/steer` says `no active turn to steer`, follow the branch's lifecycle ADR or contract note when present and allow a new `turn/start` after re-read instead of returning a false parallel-turn warning.
 - Every activity card includes the emoji marker, Codex label, textual state, and
@@ -108,25 +112,27 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 ## Collaboration Contract
 
 - Screenshots, Telegram message ids, daemon logs, CI logs, and user-observed symptoms are primary evidence. Investigate them before generalizing.
-- If private env/auth/chat/thread/session state is missing, stop and ask. Do not invent credentials, route ids, Telegram chat ids, thread ids, or live state.
+- If private env/auth/chat/thread/session state is required to complete the current task and is unavailable, ask for it; otherwise continue with safe public or read-only evidence. Never invent credentials, route ids, Telegram chat ids, thread ids, or live state.
+- If a Skill or repository rule causes a pause, permission request, unfinished result, or divergence from the user's requested outcome, name the exact file and rule and distinguish a mandatory requirement from the agent's interpretation.
 - Keep an explicit original-blockers checklist in long tasks and state which initial problems are fixed, partially fixed, or still open.
 - If the same symptom repeats, stop patching the surface and inspect the lower layer: app-server session lifecycle, poll/live race, terminal gating, routing state, or App Server state.
 - Separate readback identity, Bot API delivery/routing identity, and durable Codex identity. Do not conflate Telegram readback chat, Bot API chat id, and `threadId`.
 
 ## Definition Of Done For Telegram-Facing Changes
 
-- For UI, routing, observer, lifecycle, Plan Mode, Details, Markdown rendering, or callback changes, unit tests are not enough when a live contour is available.
-- Done means: rebuild, restart daemon if needed, perform real Telegram readback, inspect edited messages, click/read callbacks when relevant, and correlate daemon logs or SQLite when lifecycle is involved.
+- For UI, routing, observer, lifecycle, Plan Mode, Details, Markdown rendering, or callback changes, unit tests are not enough when a live contour is available and the operator has authorized live mutation.
+- Prepare the rebuild and candidate first. After explicit operator authorization, restart the daemon if needed, perform real Telegram readback, inspect edited messages, exercise callbacks when relevant, and correlate daemon logs or SQLite when lifecycle is involved.
 - Bot API send/edit success alone is not sufficient.
-- If live E2E is unavailable, state the exact blocker and mark the change as not fully validated.
-- After changes, run the smallest relevant check first, then broader checks such as targeted tests, `go test ./...`, and `go build -buildvcs=false ./...`.
+- If live E2E is unavailable or not authorized, state the exact constraint and mark the change as not fully validated.
+- During iteration run the smallest relevant check first. Use broader checks according to Testing And TDD Discipline and Required Checks.
 
 ## Testing And TDD Discipline
 
-- Use tests as the main feedback loop. Add or update tests for new behavior and bug fixes.
+- Use tests as the main feedback loop for non-trivial behavior. Add or update tests for behavior changes and bug fixes; reversible, low-impact documentation or configuration edits need proportionate checks rather than artificial mirror tests.
 - Prefer TDD for non-trivial changes: write or update a failing test, make it pass, then refactor.
 - Test public behavior through stable interfaces. Mock only external boundaries or slow/non-deterministic dependencies.
 - Keep tests deterministic, isolated, and runnable without manual setup.
+- Run the smallest relevant tests while iterating. Before commit or release, run the Required Checks once after the relevant changes settle. Do not repeat an unchanged passing suite unless related code changed or a new failure makes it relevant.
 - If a check cannot be run, say exactly why and what should be run manually.
 - For feature/test context before changing Telegram routing, observer panels, Plan Mode, diagnostics, Telegram rendering, or lifecycle recovery, read `docs/testing/regression-map.md` and the ADR named there when present.
 - Behavior changes need the matching ADR or contract note, regression-map/test anchors when present, and validation notes when live Telegram was used.
@@ -161,10 +167,8 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 
 ## Change Rules
 
-- Keep changes small, contract-preserving, and focused on the requested task.
 - Remove dead code introduced by the change.
 - Update README and public docs when public behavior changes.
-- Add or update tests for routing, observer target, panel lifecycle, callbacks, Markdown/entity rendering, export behavior, and lifecycle recovery.
 - Update ADRs when behavior or architecture changes. Supersede old ADRs instead of silently contradicting them.
 - Do not hide uncertainty. Call out assumptions, remaining risks, and checks that could not be run.
 - Final summaries should state what changed, what was tested, and what risk remains.

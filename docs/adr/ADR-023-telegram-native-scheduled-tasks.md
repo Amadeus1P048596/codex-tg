@@ -28,16 +28,19 @@ rule that Desktop and Telegram own separate mutable runtime state.
 - The existing private stdio `automation_update` MCP tool continues to provide
   validated list/view/create/update/delete operations. New definitions carry an
   `owner = "codex-tg"` marker and may specify a working directory.
-- The daemon evaluates supported local-time `HOURLY`, `DAILY`, and `WEEKLY`
-  RRULEs every 15 seconds.
+- The daemon evaluates supported local-time `HOURLY`, `DAILY`, `WEEKLY`, and
+  `MONTHLY` RRULEs every 15 seconds. Monthly rules accept positive
+  `BYMONTHDAY` values from 1 through 31 and skip months where a selected day
+  does not exist.
 - A due occurrence is claimed durably in daemon SQLite before App Server work is
   started. The same task/time-slot is therefore at-most-once across daemon
   restarts.
 - If the Telegram App Server or observer target is temporarily unavailable, the
   occurrence remains unclaimed and is retried after readiness returns.
 - Each claimed occurrence starts a new thread and turn in the Telegram-private
-  App Server using the task prompt, model, reasoning effort, and optional cwd.
-  It never resumes a prior thread.
+  App Server using the task prompt, optional cwd, and the same SQLite-backed
+  model/reasoning settings as conversation turns. Task-local model fields are
+  not execution authority. It never resumes a prior thread.
 - Scheduled threads stay out of the current chat binding and the normal
   observer, Home, inbox, and activity-card surfaces. They are private execution
   contexts rather than user conversations.
@@ -47,15 +50,32 @@ rule that Desktop and Telegram own separate mutable runtime state.
 - Terminal or input-required scheduled states publish one standalone message
   through the daemon's unified push service. That message includes the task
   name and owning conversation title; `failed_runs_only` still suppresses a
-  successful result.
+  successful result. A successful run whose trimmed final response is exactly
+  `DONT_NOTIFY` is recorded as complete without publishing a message.
 - External private-network producers may use an optional authenticated
   `POST /v1/push` adapter. It is disabled by default, accepts no Telegram
   credentials or destination ids, and routes through the configured observer
   target with durable idempotency keys.
+- A push idempotency key is claimed durably before Telegram delivery starts.
+  An ambiguous timeout is not replayed, favoring at-most-once delivery over a
+  duplicate operator notification.
 - `heartbeat` remains unsupported because scheduled continuation would carry
   mutable conversation state and writer ownership across occurrences.
 
 ## Consequences
+
+### Scheduled terminal notification safety
+
+Scheduler-owned current turns share the transient `interrupted` grace gate
+from ADR-012. An ambiguous poll snapshot must not update the run to cancelled
+or publish a notification while that gate is deferring it. Explicit interrupts
+and grace expiry remain terminal; recovered successful `DONT_NOTIFY` results
+remain silent. This protection does not mark hidden runs as interactive chats.
+
+Push identity uses the task, due slot, thread, turn, and notification phase
+(needs-input or terminal), never a changing progress/final content fingerprint.
+Late snapshots belonging to a previous occurrence cannot publish under the
+current occurrence's slot or overwrite its run state.
 
 - Telegram scheduling no longer depends on Codex Desktop being open, noticing a
   file change, or delivering a Desktop notification.

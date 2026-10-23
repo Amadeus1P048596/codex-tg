@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Sends the completed result as a new notifying Telegram card, then removes the
+  silent Working card after successful delivery, so completion remains visible
+  without a separate one-line `Completed` notice.
+- Adds a Windows managed Codex runtime with complete-bundle validation,
+  non-disruptive Desktop build discovery, active/previous retention, App Server
+  confirmation, and automatic startup rollback; child processes remain
+  windowless.
+- Groups captioned Telegram photo albums by `media_group_id` and submits their
+  caption plus every image as one ordered App Server input.
+- Adds compact `/m` model-status and two-step `/sm` model/reasoning selection
+  commands while retaining the existing settings commands for compatibility.
+- Adds `/speed` with persisted `normal` and `fast` choices shared by future
+  conversation turns and Telegram-native scheduled runs.
+- Extends the Telegram-native RRULE scheduler with monthly `BYMONTHDAY`
+  occurrences, including interval, leap-day, and missing-calendar-day handling,
+  and treats an exact successful `DONT_NOTIFY` result as a silent completion.
+- Makes `/h`, `/new`, `/t`, `/c`, `/a`, and `/un` the compact primary Telegram
+  commands, keeps long creation/navigation and session-admin commands as hidden
+  compatibility routes, and sends Home's new-session action directly into the
+  isolated Chat flow.
+- Renders a fitting multi-paragraph final with a first-paragraph visible summary
+  and the complete answer inside the expandable block instead of splitting the
+  answer into separate visible and hidden halves.
+- Reduces running activity cards to Stop, Steer, and thread switching, and
+  completed cards to Details and thread switching; diagnostic and full-log
+  actions no longer occupy the primary card surface.
+- Paginates the Telegram runtime thread picker in five-visible-session pages,
+  filling across raw App Server cursors after internal and automation sessions
+  are filtered, and avoids replaying an already-seen completion notice when a
+  completed foreground session is switched into the background.
 - Delivers completed Codex image-generation and dynamic-tool image outputs as
   de-duplicated Telegram photos, with bounded decoding, workspace-confined
   Markdown attachment paths, and no internal generation-prompt disclosure.

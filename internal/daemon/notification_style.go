@@ -64,20 +64,21 @@ func renderNotificationCard(view notificationCardView) model.RenderedMessage {
 	}
 
 	summary := cleanTelegramNilLiteral(view.Summary)
-	if strings.TrimSpace(summary) == "" {
+	detailText := cleanTelegramNilLiteral(view.Details)
+	if strings.TrimSpace(summary) == "" && strings.TrimSpace(detailText) == "" {
 		summary = notificationEmptySummary(view.State)
 	}
 	visibleSummary, overflow := splitNotificationBody(summary)
 	summaryHTML, summaryPlain := tgformat.MarkdownToHTML(visibleSummary)
-	details := joinNotificationDetails(overflow, cleanTelegramNilLiteral(view.Details))
+	details := joinNotificationDetails(overflow, detailText)
 	detailsHTML, detailsPlain := tgformat.MarkdownToHTML(details)
 
 	htmlParts := []string{headerHTML}
 	plainParts := []string{headerPlain}
-	if notificationStateShowsDurationLine(view.State) && duration != "" {
+	if notificationStateShowsDurationLine(view.State) && duration != "" && strings.TrimSpace(summaryHTML) != "" {
 		htmlParts = append(htmlParts, summaryHTML+" · "+html.EscapeString(duration))
 		plainParts = append(plainParts, summaryPlain+" · "+duration)
-	} else {
+	} else if strings.TrimSpace(summaryHTML) != "" {
 		htmlParts = append(htmlParts, "", summaryHTML)
 		plainParts = append(plainParts, "", summaryPlain)
 	}

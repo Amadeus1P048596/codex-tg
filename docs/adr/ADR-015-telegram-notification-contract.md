@@ -2,7 +2,8 @@
 
 - Status: accepted
 - Supersedes: the terminal finalization message-edit detail in ADR-004 and ADR-010.
-- Amended by: ADR-021 stable activity-card lifecycle.
+- Amended by: ADR-021 stable activity-card lifecycle and its 2026-10-21
+  notifying-final replacement.
 
 ## Context
 
@@ -16,19 +17,25 @@ Telegram edits do not provide a reliable per-edit notification contract. Therefo
 - Audible messages are limited to:
   - `New run`, controlled by `CTR_GO_NOTIFY_NEW_RUN` and enabled by default;
   - a newly sent terminal card;
-  - one compact terminal notice when a foreground Working card is completed in place;
-  - a separately sent long final result, which replaces the compact terminal notice for that turn;
   - a routeable `[Plan]` prompt-card for user input or structured choices.
 - `[commentary]`, `[Tool]`, `[Output]`, `[User]`, command/menu responses, explicit exports, and fallback/error messages are silent.
-- Finalization edits an existing Working card in place. Because Telegram edits do not notify, a short foreground result also sends one de-duplicated compact terminal notice as a new audible message.
-- A fast turn with no Working card sends one audible terminal card. A long result edits the card and sends the full result as the audible new message, without an additional compact notice.
-- Details and Back callbacks remain bound to the completed run panel/card and its stable summary message id.
+- Finalization sends the complete terminal card as a new audible message because
+  Telegram cannot notify on an edit. After that send is persisted successfully,
+  the old silent Working card is deleted best-effort.
+- If the terminal-card send fails, the Working card and retryable panel state are
+  preserved. A fast turn with no Working card sends the same audible terminal
+  card without a deletion step.
+- A long result uses the terminal card as its single completion notification;
+  following `Codex · Result` messages are silent companions.
+- Details and Back callbacks are rebound to the new terminal card message id.
 
 ## Consequences
 
 - The operator receives fewer notifications while preserving alerts for run start, required Plan input, and run completion.
-- The completed-run surface remains the same stable Final/Details message that previously showed Working state.
-- Compact terminal notices are attention signals, not replacement activity cards, and are de-duplicated per target/thread/turn/final fingerprint.
+- The chat retains one primary card after best-effort cleanup while completion
+  produces a real Telegram notification.
+- The terminal card, rather than a separate one-line completion notice, is the
+  de-duplicated attention and interaction surface.
 
 ## Non-goals
 

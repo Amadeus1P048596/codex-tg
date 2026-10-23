@@ -5,10 +5,41 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestFromEnvDefaultsManagedCodexRuntimeOnWindows(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "telegram-home")
+	t.Setenv("CTR_GO_CONFIG", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("CTR_GO_HOME", home)
+	t.Setenv("CTR_GO_CODEX_RUNTIME_MANAGED", "")
+	t.Setenv("CTR_GO_CODEX_RUNTIME_DIR", "")
+	t.Setenv("CTR_GO_CODEX_RUNTIME_SYNC_SECONDS", "")
+
+	cfg := FromEnv()
+	if cfg.ManagedCodexRuntime != (runtime.GOOS == "windows") {
+		t.Fatalf("ManagedCodexRuntime = %t, want Windows default %t", cfg.ManagedCodexRuntime, runtime.GOOS == "windows")
+	}
+	if cfg.CodexRuntimeDir != filepath.Join(home, "codex-runtime") {
+		t.Fatalf("CodexRuntimeDir = %q, want private runtime under home", cfg.CodexRuntimeDir)
+	}
+	if cfg.CodexRuntimeSyncInterval != 6*time.Hour {
+		t.Fatalf("CodexRuntimeSyncInterval = %s, want 6h", cfg.CodexRuntimeSyncInterval)
+	}
+}
+
+func TestFromEnvCanDisableManagedCodexRuntime(t *testing.T) {
+	t.Setenv("CTR_GO_CONFIG", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("CTR_GO_CODEX_RUNTIME_MANAGED", "off")
+
+	if cfg := FromEnv(); cfg.ManagedCodexRuntime {
+		t.Fatal("ManagedCodexRuntime = true, want explicit opt-out")
+	}
+}
 
 func TestFromEnvReadsCodexChatsRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "Codex")

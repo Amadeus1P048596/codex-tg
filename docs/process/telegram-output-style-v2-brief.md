@@ -15,8 +15,9 @@ Working to a terminal state in place.
 - Fold tool, output, plan, and lifecycle changes into that card with
   `editMessageText`.
 - Throttle non-terminal edits to one update per four seconds.
-- Complete, fail, cancel, or request input by editing the same message. Do not
-  delete the Working card and send a replacement.
+- Request input by editing the same message. Complete, fail, or cancel by sending
+  a new notifying terminal card, then delete the Working card only after the new
+  card is delivered and persisted.
 - If a turn finishes before a Working card exists, send one terminal card.
 - If a final answer is longer than the compact-card budget, complete the card
   with a summary and send the full result in a following `Codex · Result`
@@ -139,10 +140,11 @@ Tools file, full-log, or a future verbose/debug mode.
 ## Notification Policy
 
 - `typing` and Working edits are silent.
-- Terminal transitions still edit the same activity card. Short foreground
-  results also emit one de-duplicated compact audible notice because Telegram
-  edits cannot notify; fast terminal cards and separately sent long results are
-  already audible and do not add that notice.
+- Terminal transitions send one de-duplicated, normally notifying result card
+  because Telegram edits cannot notify. The old silent Working card is then
+  removed; fast turns skip that cleanup because no Working card exists.
+- Long-result continuation messages are silent so the terminal card produces the
+  only completion notification.
 - `Needs input` retains its product notification policy.
 - Repeated tool events never create notifications.
 

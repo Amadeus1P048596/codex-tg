@@ -27,28 +27,22 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	}
 
 	message, buttons, cardHash := s.renderFinalCard(ctx, panel.ID, thread, snapshot)
-	finalMessageID := panel.SummaryMessageID
-	editedExistingCard := finalMessageID != 0
-	if finalMessageID != 0 {
-		if err := sender.EditRenderedMessage(ctx, target.ChatID, target.TopicID, finalMessageID, message, buttons); err != nil {
-			return fmt.Errorf("edit Telegram working card to final: %w", err)
-		}
-		s.markPanelEdited(panel.ID, s.currentTime())
-	} else {
-		messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons, notifySendOptions())
-		if err != nil {
-			return err
-		}
-		finalMessageID = lastMessageID(messageIDs)
-		if finalMessageID == 0 {
-			return fmt.Errorf("telegram final card send returned no message id")
-		}
-		s.markPanelEdited(panel.ID, s.currentTime())
+	workingMessageID := panel.SummaryMessageID
+	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons, notifySendOptions())
+	if err != nil {
+		return fmt.Errorf("send Telegram final card: %w", err)
 	}
+	finalMessageID := lastMessageID(messageIDs)
+	if finalMessageID == 0 {
+		return fmt.Errorf("telegram final card send returned no message id")
+	}
+	s.markPanelEdited(panel.ID, s.currentTime())
 	finalText := telegramFinalText(snapshot.LatestFinalText)
-	if editedExistingCard && !finalNeedsSeparateMessage(finalText) {
-		if err := s.sendForegroundTerminalNotice(ctx, sender, target, thread, snapshot); err != nil {
-			return err
+	if finalNeedsSeparateMessage(finalText) {
+		fullMessages := renderLongFinalMessages(s.visualMarker(ctx, thread.ID), finalText)
+		if _, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, fullMessages, nil, silentSendOptions()); err != nil {
+			_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, finalMessageID)
+			return fmt.Errorf("send full Telegram final: %w", err)
 		}
 	}
 	_ = s.store.PutMessageRoute(ctx, model.MessageRoute{
@@ -70,31 +64,22 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	if err := s.store.UpdateThreadPanelFinalCard(ctx, panel.ID, panel.SummaryMessageID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP, panel.DetailsViewJSON, panel.LastFinalCardHash); err != nil {
 		return err
 	}
-	if finalNeedsSeparateMessage(finalText) {
-		fullMessages := renderLongFinalMessages(s.visualMarker(ctx, thread.ID), finalText)
-		if _, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, fullMessages, nil, notifySendOptions()); err != nil {
-			return fmt.Errorf("send full Telegram final: %w", err)
+	if workingMessageID != 0 && workingMessageID != finalMessageID {
+		if err := sender.DeleteMessage(ctx, target.ChatID, target.TopicID, workingMessageID); err != nil {
+			s.setError(ctx, fmt.Errorf("delete Telegram working card after final send: %w", err))
 		}
 	}
 	return nil
 }
 
 func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (model.RenderedMessage, [][]model.ButtonSpec, string) {
-	writerButton := s.callbackButton(ctx, "在 TG 中继续", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil)
-	if s.ownsLiveThread(thread.ID) {
-		writerButton = s.callbackButton(ctx, "释放空闲写入权", "release_writer", thread.ID, snapshot.LatestTurnID, "", nil)
-	}
 	buttons := [][]model.ButtonSpec{
 		{
 			s.callbackButton(ctx, "📋 详情", "details_open", thread.ID, snapshot.LatestTurnID, "", map[string]any{
 				"panel_id": panelID,
 				"page":     0,
 			}),
-			s.callbackButton(ctx, "📄 完整日志", "get_full_log", thread.ID, snapshot.LatestTurnID, "", nil),
-		},
-		{
-			s.callbackButton(ctx, "显示卡片", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
-			writerButton,
+			s.callbackButton(ctx, "切换会话", "threads_shortcut", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
 	}
 	if s.finalCardShouldShowTurnOffPlan(ctx, thread.ID, snapshot) {
@@ -104,9 +89,6 @@ func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread mod
 			}),
 		})
 	}
-	buttons = append(buttons, []model.ButtonSpec{
-		s.callbackButton(ctx, "查看会话 ID", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
-	})
 	finalSummary, finalDetails := finalCardContent(telegramFinalText(snapshot.LatestFinalText))
 	message := renderNotificationCard(notificationCardView{
 		Marker:     s.visualMarker(ctx, thread.ID),
@@ -132,9 +114,6 @@ func finalCardContent(value string) (string, string) {
 	if value == "" {
 		return "", ""
 	}
-	if !finalNeedsSeparateMessage(value) {
-		return value, ""
-	}
 	paragraph := value
 	if index := strings.Index(paragraph, "\n\n"); index >= 0 {
 		paragraph = paragraph[:index]
@@ -142,6 +121,12 @@ func finalCardContent(value string) (string, string) {
 		paragraph = paragraph[:index]
 	}
 	paragraph = compactActivityCommand(paragraph, 320)
+	if !finalNeedsSeparateMessage(value) {
+		if paragraph == compactActivityCommand(value, 320) {
+			return value, ""
+		}
+		return "", value
+	}
 	return paragraph, "完整结果已单独发送。"
 }
 

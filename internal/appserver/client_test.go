@@ -258,6 +258,38 @@ func TestTurnStartParamsIncludesDefaultCollaborationMode(t *testing.T) {
 	}
 }
 
+func TestTurnStartParamsIncludesPerTurnServiceTier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		speed     string
+		wantTier  string
+		wantField bool
+	}{
+		{name: "normal", speed: "normal", wantTier: "default", wantField: true},
+		{name: "fast", speed: "fast", wantTier: "fast", wantField: true},
+		{name: "unspecified", speed: "", wantField: false},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			params, err := turnStartParams("thread-1", "Run it", "/tmp/project", TurnStartOptions{Speed: test.speed})
+			if err != nil {
+				t.Fatalf("turnStartParams failed: %v", err)
+			}
+			got, ok := params["serviceTierForTurn"]
+			if ok != test.wantField {
+				t.Fatalf("serviceTierForTurn present = %v, want %v (params=%#v)", ok, test.wantField, params)
+			}
+			if test.wantField && got != test.wantTier {
+				t.Fatalf("serviceTierForTurn = %#v, want %q", got, test.wantTier)
+			}
+		})
+	}
+}
+
 func TestTurnStartParamsRejectsModeWithoutModel(t *testing.T) {
 	_, err := turnStartParams("thread-1", "Draft a plan", "", TurnStartOptions{CollaborationMode: "plan"})
 	if err == nil {

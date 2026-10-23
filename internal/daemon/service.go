@@ -106,10 +106,12 @@ type Service struct {
 
 const (
 	observerRecentThreadLimit = 50
+	threadPickerPageSize      = 5
 	collaborationModeDefault  = "default"
 	collaborationModePlan     = "plan"
 	codexModelStateKey        = "codex.model"
 	codexReasoningStateKey    = "codex.reasoning_effort"
+	codexSpeedStateKey        = "codex.speed"
 	telegramOriginHotPollMax  = 75 * time.Second
 	telegramOriginHotPollTick = 3 * time.Second
 	telegramWriterIdleTimeout = 5 * time.Minute
@@ -203,6 +205,12 @@ func (s *Service) SetSender(sender Sender) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sender = sender
+}
+
+func (s *Service) AppServersConnected() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.liveConnected && s.pollConnected
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -403,6 +411,15 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 			return nil, err
 		}
 		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "请选择会话。")
+	case "threads_shortcut":
+		return s.threadsOverview(ctx, "")
+	case "threads_page":
+		page := maxInt(1, payloadMapInt(payload, "page"))
+		response, err := s.threadPickerPage(ctx, payloadMapString(payload, "cursor"), page, payloadMapStringSlice(payload, "history"))
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, fmt.Sprintf("第 %d 页", page))
 	case "home_inbox":
 		response, err := s.inboxOverview(ctx, chatID, topicID)
 		if err != nil {
@@ -412,7 +429,11 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 	case "home_show_current":
 		return s.showCurrentFromHome(ctx, chatID, topicID, messageID)
 	case "home_new_menu":
-		return s.editNavigationResponse(ctx, chatID, topicID, messageID, s.newSessionMenu(ctx), "请选择会话类型。")
+		response, err := s.newChatCommand(ctx, chatID, topicID, "")
+		if err != nil {
+			return nil, err
+		}
+		return s.editNavigationResponse(ctx, chatID, topicID, messageID, response, "请输入标题。")
 	case "home_new_chat":
 		response, err := s.newChatCommand(ctx, chatID, topicID, "")
 		if err != nil {
@@ -439,8 +460,14 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Reasoning", s.codexReasoningMenu)
 	case "settings_model_set":
 		return s.setCodexModel(ctx, chatID, topicID, messageID, payload)
+	case "settings_model_set_then_reasoning":
+		return s.setCodexModelThenReasoning(ctx, chatID, topicID, messageID, payload)
 	case "settings_reasoning_set":
 		return s.setCodexReasoningEffort(ctx, chatID, topicID, messageID, payload)
+	case "settings_speed_menu":
+		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Speed", s.codexSpeedMenu)
+	case "settings_speed_set":
+		return s.setCodexSpeed(ctx, chatID, topicID, messageID, payload)
 	case "projects_page":
 		return s.projectsPage(ctx, chatID, topicID, messageID, payload)
 	case "projects_close":
@@ -1462,10 +1489,10 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		rest = strings.TrimSpace(parts[1])
 	}
 	switch command {
-	case "/start", "/home":
+	case "/start", "/home", "/h":
 		return s.homeOverview(ctx, chatID, topicID)
 	case "/help":
-		return &DirectResponse{Text: "常用命令：\n/home 会话首页\n/current 当前会话\n/threads 切换会话\n/inbox 待处理\n/newchat 新建 Chat\n/newthread 新建普通会话\n/cancel 取消待输入的新建请求\n/title <标题> 修改当前会话标题\n/archive 归档当前会话\n/unarchive 恢复已归档会话\n/settings 模型设置\n/status 运行状态\n\n更多控制：\n/projects\n/show <会话>\n/bind <会话>\n/reply [--plan] <会话> <内容>\n/plan <内容>\n/context\n/observe all|off\n/release\n/repair\n/stop [会话]"}, nil
+		return &DirectResponse{Text: "常用命令：\n/h 会话首页\n/new 新建会话\n/t 切换会话\n/c 当前会话\n/inbox 待处理\n/cancel 取消待输入的新建请求\n/title <标题> 修改当前会话标题\n/a 归档当前会话\n/un 恢复已归档会话\n/m 查看模型与推理强度\n/sm 切换模型与推理强度\n/speed 切换 normal/fast\n/status 运行状态\n\n更多控制：\n/settings\n/model\n/effort\n/projects\n/show <会话>\n/bind <会话>\n/reply [--plan] <会话> <内容>\n/plan <内容>\n/context\n/observe all|off\n/release\n/repair\n/stop [会话]"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1478,7 +1505,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		return &DirectResponse{Text: text}, nil
-	case "/current":
+	case "/current", "/c":
 		return s.currentThreadOverview(ctx, chatID, topicID)
 	case "/inbox":
 		return s.inboxOverview(ctx, chatID, topicID)
@@ -1510,19 +1537,23 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		return &DirectResponse{Text: fmt.Sprintf("Panel mode switched to %s.", mode)}, nil
+	case "/m":
+		return s.codexSettingsStatus(ctx)
+	case "/sm":
+		return s.codexSequentialModelMenu(ctx)
 	case "/settings", "/codex_settings":
 		return s.codexSettingsOverview(ctx)
 	case "/model", "/models":
 		return s.codexModelMenu(ctx)
 	case "/effort", "/reasoning", "/reasoning_effort":
 		return s.codexReasoningMenu(ctx)
-	case "/threads":
+	case "/speed":
+		return s.codexSpeedMenu(ctx)
+	case "/threads", "/t":
 		return s.threadsOverview(ctx, rest)
 	case "/projects":
 		return s.projectsOverview(ctx)
-	case "/new":
-		return s.newThreadCommand(ctx, chatID, topicID, rest)
-	case "/newchat":
+	case "/new", "/newchat":
 		return s.newChatCommand(ctx, chatID, topicID, rest)
 	case "/newthread":
 		return s.newThreadWithoutCWDCommand(ctx, chatID, topicID, rest)
@@ -1530,9 +1561,9 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		return s.cancelPendingNewThreadPrompt(ctx, chatID, topicID)
 	case "/title":
 		return s.renameCurrentThread(ctx, chatID, topicID, rest)
-	case "/archive":
+	case "/archive", "/a":
 		return s.archiveCurrentThreadPrompt(ctx, chatID, topicID)
-	case "/unarchive":
+	case "/unarchive", "/un":
 		return s.archivedThreadsOverview(ctx)
 	case "/show":
 		decision, err := s.resolveRoute(ctx, chatID, topicID, rest, replyToMessageID)
@@ -1638,34 +1669,61 @@ func (s *Service) handlePlainInputs(ctx context.Context, chatID, topicID int64, 
 func (s *Service) codexSettingsOverview(ctx context.Context) (*DirectResponse, error) {
 	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
 	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	speedValue, _ := s.store.GetState(ctx, codexSpeedStateKey)
 	lines := []string{
 		"Codex settings",
 		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
 		fmt.Sprintf("Reasoning effort: %s", settingValueLabel(reasoningValue, "Auto")),
+		fmt.Sprintf("Speed: %s", normalizeCodexSpeed(speedValue)),
 		"",
-		"Used for Telegram-started Plan Mode turns.",
+		"Used for all future Telegram turns and scheduled runs.",
 	}
 	buttons := [][]model.ButtonSpec{
 		{
 			s.callbackButton(ctx, "模型", "settings_model_menu", "settings", "", "", nil),
 			s.callbackButton(ctx, "推理强度", "settings_reasoning_menu", "settings", "", "", nil),
 		},
+		{s.callbackButton(ctx, "速度", "settings_speed_menu", "settings", "", "", nil)},
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
 }
 
+func (s *Service) codexSettingsStatus(ctx context.Context) (*DirectResponse, error) {
+	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
+	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	return &DirectResponse{Text: strings.Join([]string{
+		"当前 Codex 设置",
+		fmt.Sprintf("模型：%s", settingValueLabel(modelValue, "Auto")),
+		fmt.Sprintf("推理强度：%s", settingValueLabel(reasoningValue, "Auto")),
+	}, "\n")}, nil
+}
+
 func (s *Service) codexModelMenu(ctx context.Context) (*DirectResponse, error) {
+	return s.codexModelMenuForFlow(ctx, false)
+}
+
+func (s *Service) codexSequentialModelMenu(ctx context.Context) (*DirectResponse, error) {
+	return s.codexModelMenuForFlow(ctx, true)
+}
+
+func (s *Service) codexModelMenuForFlow(ctx context.Context, sequential bool) (*DirectResponse, error) {
 	current, _ := s.store.GetState(ctx, codexModelStateKey)
 	models, err := s.codexModels(ctx)
 	if err != nil {
 		return &DirectResponse{Text: fmt.Sprintf("Could not load Codex models: %v", err)}, nil
 	}
+	title := "Codex model"
+	action := "settings_model_set"
+	if sequential {
+		title = "切换模型和推理强度 · 1/2\n选择模型"
+		action = "settings_model_set_then_reasoning"
+	}
 	lines := []string{
-		"Codex model",
+		title,
 		fmt.Sprintf("Current: %s", settingValueLabel(current, "Auto")),
 	}
 	buttons := [][]model.ButtonSpec{
-		{s.callbackButton(ctx, selectedButtonLabel("Auto", current == ""), "settings_model_set", "settings", "", "", map[string]any{"value": ""})},
+		{s.callbackButton(ctx, selectedButtonLabel("Auto", current == ""), action, "settings", "", "", map[string]any{"value": ""})},
 	}
 	for _, option := range models {
 		label := option.ID
@@ -1673,17 +1731,27 @@ func (s *Service) codexModelMenu(ctx context.Context) (*DirectResponse, error) {
 			continue
 		}
 		buttons = append(buttons, []model.ButtonSpec{
-			s.callbackButton(ctx, selectedButtonLabel(shortButtonLabel(label), option.ID == current), "settings_model_set", "settings", "", "", map[string]any{"value": option.ID}),
+			s.callbackButton(ctx, selectedButtonLabel(shortButtonLabel(label), option.ID == current), action, "settings", "", "", map[string]any{"value": option.ID}),
 		})
 	}
-	buttons = append(buttons, []model.ButtonSpec{
-		s.callbackButton(ctx, "推理强度", "settings_reasoning_menu", "settings", "", "", nil),
-		s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
-	})
+	if !sequential {
+		buttons = append(buttons, []model.ButtonSpec{
+			s.callbackButton(ctx, "推理强度", "settings_reasoning_menu", "settings", "", "", nil),
+			s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
+		})
+	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
 }
 
 func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, error) {
+	return s.codexReasoningMenuForFlow(ctx, false)
+}
+
+func (s *Service) codexSequentialReasoningMenu(ctx context.Context) (*DirectResponse, error) {
+	return s.codexReasoningMenuForFlow(ctx, true)
+}
+
+func (s *Service) codexReasoningMenuForFlow(ctx context.Context, sequential bool) (*DirectResponse, error) {
 	current, _ := s.store.GetState(ctx, codexReasoningStateKey)
 	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
 	efforts := allReasoningEfforts()
@@ -1692,8 +1760,12 @@ func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, erro
 			efforts = selected.SupportedReasoningEffort
 		}
 	}
+	title := "Codex reasoning effort"
+	if sequential {
+		title = "切换模型和推理强度 · 2/2\n选择推理强度"
+	}
 	lines := []string{
-		"Codex reasoning effort",
+		title,
 		fmt.Sprintf("Current: %s", settingValueLabel(current, "Auto")),
 		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
 	}
@@ -1707,14 +1779,39 @@ func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, erro
 		}
 		buttons = append(buttons, row)
 	}
-	buttons = append(buttons, []model.ButtonSpec{
-		s.callbackButton(ctx, "模型", "settings_model_menu", "settings", "", "", nil),
-		s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
-	})
+	if !sequential {
+		buttons = append(buttons, []model.ButtonSpec{
+			s.callbackButton(ctx, "模型", "settings_model_menu", "settings", "", "", nil),
+			s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
+		})
+	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
 }
 
+func (s *Service) codexSpeedMenu(ctx context.Context) (*DirectResponse, error) {
+	stored, _ := s.store.GetState(ctx, codexSpeedStateKey)
+	current := normalizeCodexSpeed(stored)
+	buttons := [][]model.ButtonSpec{{
+		s.callbackButton(ctx, selectedButtonLabel("normal", current == "normal"), "settings_speed_set", "settings", "", "", map[string]any{"value": "normal"}),
+		s.callbackButton(ctx, selectedButtonLabel("fast", current == "fast"), "settings_speed_set", "settings", "", "", map[string]any{"value": "fast"}),
+	}, {
+		s.callbackButton(ctx, "设置", "settings_overview", "settings", "", "", nil),
+	}}
+	return &DirectResponse{
+		Text:    strings.Join([]string{"Codex speed", fmt.Sprintf("Current: %s", current), "", "fast 响应更快，但会消耗更多 Codex 额度。"}, "\n"),
+		Buttons: buttons,
+	}, nil
+}
+
 func (s *Service) setCodexModel(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	return s.setCodexModelForFlow(ctx, chatID, topicID, messageID, payload, false)
+}
+
+func (s *Service) setCodexModelThenReasoning(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	return s.setCodexModelForFlow(ctx, chatID, topicID, messageID, payload, true)
+}
+
+func (s *Service) setCodexModelForFlow(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any, continueToReasoning bool) (*DirectResponse, error) {
 	value := payloadMapString(payload, "value")
 	if value != "" {
 		models, err := s.codexModels(ctx)
@@ -1727,6 +1824,9 @@ func (s *Service) setCodexModel(ctx context.Context, chatID, topicID, messageID 
 	}
 	if err := s.store.SetState(ctx, codexModelStateKey, value); err != nil {
 		return nil, err
+	}
+	if continueToReasoning {
+		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "模型已保存，请选择推理强度。", s.codexSequentialReasoningMenu)
 	}
 	return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Model saved.", func(ctx context.Context) (*DirectResponse, error) {
 		return s.codexSettingsSaved(ctx, "Model saved.")
@@ -1746,13 +1846,28 @@ func (s *Service) setCodexReasoningEffort(ctx context.Context, chatID, topicID, 
 	})
 }
 
+func (s *Service) setCodexSpeed(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	value := strings.ToLower(strings.TrimSpace(payloadMapString(payload, "value")))
+	if value != "normal" && value != "fast" {
+		return &DirectResponse{CallbackText: "Speed option is stale.", Text: "This speed is not supported. Use /speed to refresh."}, nil
+	}
+	if err := s.store.SetState(ctx, codexSpeedStateKey, value); err != nil {
+		return nil, err
+	}
+	return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Speed saved.", func(ctx context.Context) (*DirectResponse, error) {
+		return s.codexSettingsSaved(ctx, "Speed saved.")
+	})
+}
+
 func (s *Service) codexSettingsSaved(ctx context.Context, status string) (*DirectResponse, error) {
 	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
 	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	speedValue, _ := s.store.GetState(ctx, codexSpeedStateKey)
 	lines := []string{
 		"Codex settings",
 		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
 		fmt.Sprintf("Reasoning effort: %s", settingValueLabel(reasoningValue, "Auto")),
+		fmt.Sprintf("Speed: %s", normalizeCodexSpeed(speedValue)),
 	}
 	if strings.TrimSpace(status) != "" {
 		lines = append(lines, "", status)
@@ -2108,7 +2223,6 @@ func (s *Service) sendInputToThreadTurnInputs(ctx context.Context, chatID, topic
 			"model":               options.Model,
 			"reasoning_effort":    options.ReasoningEffort,
 			"collaboration_mode":  options.CollaborationMode,
-			"used_thread_model":   options.Model != "" && options.Model == strings.TrimSpace(thread.PreferredModel),
 			"request_message_len": len([]rune(text)),
 		})
 		if err != nil {
@@ -2198,15 +2312,20 @@ func userInputsHaveLocalImage(inputs []control.UserInput) bool {
 func (s *Service) turnStartOptions(ctx context.Context, collaborationMode string, thread *model.Thread) appserver.TurnStartOptions {
 	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
 	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
-	options := appserver.TurnStartOptions{
+	speedValue, _ := s.store.GetState(ctx, codexSpeedStateKey)
+	return appserver.TurnStartOptions{
 		CollaborationMode: strings.TrimSpace(collaborationMode),
 		Model:             strings.TrimSpace(modelValue),
 		ReasoningEffort:   normalizeReasoningEffort(reasoningValue),
+		Speed:             normalizeCodexSpeed(speedValue),
 	}
-	if options.Model == "" && thread != nil {
-		options.Model = strings.TrimSpace(thread.PreferredModel)
+}
+
+func normalizeCodexSpeed(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "fast") {
+		return "fast"
 	}
-	return options
+	return "normal"
 }
 
 func (s *Service) ensureStartedTurnSnapshot(ctx context.Context, thread *model.Thread, turnID string) {
@@ -2741,6 +2860,9 @@ func (s *Service) answerChoice(ctx context.Context, chatID, topicID int64, route
 }
 
 func (s *Service) threadsOverview(ctx context.Context, rest string) (*DirectResponse, error) {
+	if strings.TrimSpace(rest) == "" {
+		return s.threadPickerPage(ctx, "", 1, nil)
+	}
 	limit := 8
 	search := ""
 	if trimmed := strings.TrimSpace(rest); trimmed != "" {
@@ -2771,6 +2893,129 @@ func (s *Service) threadsOverview(ctx context.Context, rest string) (*DirectResp
 		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, threadSelectionTitle(thread), "switch_thread", thread.ID, "", "", nil)})
 	}
 	return &DirectResponse{Text: "可用会话\n点击标题打开。", Buttons: buttons}, nil
+}
+
+func (s *Service) threadPickerPage(ctx context.Context, cursor string, page int, history []string) (*DirectResponse, error) {
+	threads, nextCursor, ready, err := s.runtimeThreadPage(ctx, threadPickerPageSize, cursor)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		return &DirectResponse{Text: "可用会话\n会话服务暂未就绪，请使用 /status 检查连接。"}, nil
+	}
+	page = maxInt(1, page)
+	buttons := make([][]model.ButtonSpec, 0, len(threads)+1)
+	for _, thread := range threads {
+		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, threadSelectionTitle(thread), "switch_thread", thread.ID, "", "", nil)})
+	}
+	navigation := make([]model.ButtonSpec, 0, 2)
+	if len(history) > 0 {
+		previousCursor := history[len(history)-1]
+		navigation = append(navigation, s.callbackButton(ctx, "‹ 上一页", "threads_page", "", "", "", map[string]any{
+			"cursor": previousCursor, "page": maxInt(1, page-1), "history": append([]string(nil), history[:len(history)-1]...),
+		}))
+	}
+	if strings.TrimSpace(nextCursor) != "" {
+		nextHistory := append(append([]string(nil), history...), strings.TrimSpace(cursor))
+		navigation = append(navigation, s.callbackButton(ctx, "下一页 ›", "threads_page", "", "", "", map[string]any{
+			"cursor": nextCursor, "page": page + 1, "history": nextHistory,
+		}))
+	}
+	if len(navigation) > 0 {
+		buttons = append(buttons, navigation)
+	}
+	if len(threads) == 0 && len(navigation) == 0 {
+		return &DirectResponse{Text: "可用会话\n暂无可用会话，请稍后重试或使用 /status 检查同步状态。"}, nil
+	}
+	text := fmt.Sprintf("可用会话 · 第 %d 页\n点击标题打开。", page)
+	if len(threads) == 0 {
+		text = fmt.Sprintf("可用会话 · 第 %d 页\n本页没有可切换的会话，可继续翻页。", page)
+	}
+	return &DirectResponse{Text: text, Buttons: buttons}, nil
+}
+
+func (s *Service) runtimeThreadPage(ctx context.Context, limit int, cursor string) ([]model.Thread, string, bool, error) {
+	s.mu.RLock()
+	live := s.live
+	poll := s.poll
+	liveConnected := s.liveConnected
+	pollConnected := s.pollConnected
+	s.mu.RUnlock()
+	var session Session
+	if liveConnected && live != nil {
+		session = live
+	} else if pollConnected && poll != nil {
+		session = poll
+	}
+	if session == nil {
+		return nil, "", false, nil
+	}
+	if limit < 1 {
+		limit = threadPickerPageSize
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	threads := make([]model.Thread, 0, limit)
+	nextCursor := strings.TrimSpace(cursor)
+	visited := make(map[string]struct{})
+	for len(threads) < limit {
+		if _, seen := visited[nextCursor]; seen {
+			return threads, "", true, nil
+		}
+		visited[nextCursor] = struct{}{}
+		remaining := limit - len(threads)
+		result, err := session.ThreadList(requestCtx, remaining, nextCursor)
+		if err != nil {
+			return nil, "", true, err
+		}
+		visible := s.visibleRuntimeThreadsFromListResult(ctx, result)
+		if len(visible) > remaining {
+			visible = visible[:remaining]
+		}
+		threads = append(threads, visible...)
+		nextCursor = strings.TrimSpace(payloadMapString(result, "nextCursor"))
+		if nextCursor == "" {
+			return threads, "", true, nil
+		}
+	}
+	return threads, s.nextVisibleRuntimeCursor(requestCtx, session, nextCursor, visited), true, nil
+}
+
+func (s *Service) visibleRuntimeThreadsFromListResult(ctx context.Context, result map[string]any) []model.Thread {
+	listed := appserver.ThreadsFromList(result)
+	threads := make([]model.Thread, 0, len(listed))
+	for _, thread := range listed {
+		if existing, getErr := s.store.GetThread(ctx, thread.ID); getErr == nil && existing != nil {
+			thread = s.mergeRuntimeThreadMetadata(ctx, thread, *existing)
+		}
+		_ = s.store.UpsertThread(ctx, thread)
+		if s.isAutomationExecutionThread(ctx, thread.ID) {
+			continue
+		}
+		threads = append(threads, thread)
+	}
+	return threads
+}
+
+func (s *Service) nextVisibleRuntimeCursor(ctx context.Context, session Session, cursor string, visited map[string]struct{}) string {
+	candidate := strings.TrimSpace(cursor)
+	for candidate != "" {
+		if _, seen := visited[candidate]; seen {
+			return ""
+		}
+		visited[candidate] = struct{}{}
+		result, err := session.ThreadList(ctx, 1, candidate)
+		if err != nil {
+			// Keep the cursor available so the operator can retry navigation after a
+			// transient App Server error instead of losing access to older sessions.
+			return candidate
+		}
+		if len(s.visibleRuntimeThreadsFromListResult(ctx, result)) > 0 {
+			return candidate
+		}
+		candidate = strings.TrimSpace(payloadMapString(result, "nextCursor"))
+	}
+	return ""
 }
 
 func (s *Service) runtimeThreads(ctx context.Context, limit int, search string) ([]model.Thread, bool, error) {
@@ -3525,19 +3770,16 @@ func (s *Service) renderObserverEvent(ctx context.Context, event model.ObserverE
 	if event.NeedsApproval {
 		lines = append(lines, "/status")
 	}
-	buttons := [][]model.ButtonSpec{
-		{
-			s.callbackButton(ctx, "显示卡片", "show_thread", event.ThreadID, event.TurnID, "", nil),
-			s.callbackButton(ctx, "在 TG 中继续", "bind_here", event.ThreadID, event.TurnID, "", nil),
-		},
-		{
-			s.callbackButton(ctx, "发送回复", "reply_hint", event.ThreadID, event.TurnID, "", nil),
-			s.callbackButton(ctx, "在此观察", "observe_all", event.ThreadID, event.TurnID, "", nil),
-		},
-	}
+	buttons := [][]model.ButtonSpec{}
 	if event.TurnID != "" {
-		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, "停止", "stop_turn", event.ThreadID, event.TurnID, "", nil)})
+		buttons = append(buttons, []model.ButtonSpec{
+			s.callbackButton(ctx, "停止", "stop_turn", event.ThreadID, event.TurnID, "", nil),
+			s.callbackButton(ctx, "追加指令", "arm_steer", event.ThreadID, event.TurnID, "", nil),
+		})
 	}
+	buttons = append(buttons, []model.ButtonSpec{
+		s.callbackButton(ctx, "切换会话", "threads_shortcut", event.ThreadID, event.TurnID, "", nil),
+	})
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons, ThreadID: event.ThreadID, TurnID: event.TurnID, ItemID: event.ItemID, EventID: event.EventID}
 }
 

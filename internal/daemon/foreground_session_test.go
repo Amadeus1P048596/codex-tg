@@ -162,6 +162,73 @@ func TestSwitchThreadHidesPreviousWorkingCardAndShowsSelectedCard(t *testing.T) 
 	}
 }
 
+func TestSwitchAwayFromCompletedForegroundDoesNotSendBackgroundCompletionNotice(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 18, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, Enabled: true}
+
+	completed := model.Thread{ID: "completed-before-switch", Title: "已经看过结果", Status: "completed", UpdatedAt: now.Unix()}
+	storeForegroundTestSnapshot(t, service, completed, appserver.ThreadReadSnapshot{
+		Thread: completed, LatestTurnID: "completed-turn", LatestTurnStatus: "completed",
+		LatestFinalFP: "completed-final-fp", LatestFinalText: "结果已经展示。",
+	}, now)
+	if err := service.store.SetState(ctx, foregroundThreadStateKey(target.ChatID, target.TopicID), completed.ID); err != nil {
+		t.Fatalf("SetState(foreground) failed: %v", err)
+	}
+
+	if err := service.activateForegroundThread(ctx, target, "selected-thread", false); err != nil {
+		t.Fatalf("activateForegroundThread failed: %v", err)
+	}
+	service.syncThreadPanelToTarget(ctx, target, completed.ID, false, model.PanelSourceGlobalObserver)
+	if len(sender.messages) != 0 {
+		t.Fatalf("switching away replayed completed background notice: %#v", sender.messages)
+	}
+	items, err := service.inboxItems(ctx, target.ChatID, target.TopicID)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("inbox after switching away = %#v err=%v, want empty", items, err)
+	}
+}
+
+func TestSwitchAwayFromRunningForegroundStillNotifiesWhenItFinishes(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 18, 30, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, Enabled: true}
+
+	running := model.Thread{ID: "running-before-switch", Title: "后台继续运行", Status: "active", UpdatedAt: now.Unix()}
+	snapshot := appserver.ThreadReadSnapshot{
+		Thread: running, LatestTurnID: "running-turn", LatestTurnStatus: "inProgress",
+		LatestTurnStartedAt: now.Add(-time.Minute).Format(time.RFC3339Nano),
+	}
+	storeForegroundTestSnapshot(t, service, running, snapshot, now)
+	if err := service.store.SetState(ctx, foregroundThreadStateKey(target.ChatID, target.TopicID), running.ID); err != nil {
+		t.Fatalf("SetState(foreground) failed: %v", err)
+	}
+	if err := service.activateForegroundThread(ctx, target, "selected-thread", false); err != nil {
+		t.Fatalf("activateForegroundThread failed: %v", err)
+	}
+
+	snapshot.LatestTurnStatus = "completed"
+	snapshot.LatestFinalFP = "finished-after-switch-fp"
+	snapshot.LatestFinalText = "切换后完成。"
+	storeForegroundTestSnapshot(t, service, running, snapshot, now.Add(time.Minute))
+	service.syncThreadPanelToTarget(ctx, target, running.ID, false, model.PanelSourceGlobalObserver)
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0].text, "<b>后台继续运行</b> 已完成") {
+		t.Fatalf("messages = %#v, want one real post-switch completion notice", sender.messages)
+	}
+}
+
 func storeForegroundTestSnapshot(t *testing.T, service *Service, thread model.Thread, snapshot appserver.ThreadReadSnapshot, now time.Time) {
 	t.Helper()
 	if err := service.store.UpsertThread(context.Background(), thread); err != nil {

@@ -18,7 +18,7 @@ func TestNewThreadUsesPromptTitleWhileAppServerTitleIsPlaceholder(t *testing.T) 
 	sender := &recordingSender{}
 	service.SetSender(sender)
 	ctx := context.Background()
-	threadID := "01a0399e-bec4-7a61-84cb-3b4029900ce1"
+	threadID := "thread-admin-test"
 	prompt := "看下 zlibrary 下载队列现在还有多少书没下完"
 	live := &stubSession{
 		threadStartResult: map[string]any{"thread": map[string]any{"id": threadID, "title": threadID}},
@@ -94,7 +94,7 @@ func TestSyncThreadsPreservesPromptTitleUntilRuntimePublishesRealTitle(t *testin
 
 	service := newTestService(t)
 	ctx := context.Background()
-	threadID := "01a0399e-bec4-7a61-84cb-3b4029900ce1"
+	threadID := "thread-admin-test"
 	local := model.Thread{ID: threadID, Title: "查看下载队列", LastPreview: "查看下载队列", UpdatedAt: 10}
 	if err := service.store.UpsertThread(ctx, local); err != nil {
 		t.Fatalf("UpsertThread failed: %v", err)
@@ -199,7 +199,7 @@ func TestCurrentCommandShowsForegroundThreadTitleStatusAndShortID(t *testing.T) 
 
 	service := newTestService(t)
 	ctx := context.Background()
-	thread := model.Thread{ID: "01a0399e-bec4-7a61-84cb-3b4029900ce1", Title: "查看下载队列", Status: "active", UpdatedAt: 10}
+	thread := model.Thread{ID: "thread-admin-test", Title: "查看下载队列", Status: "active", UpdatedAt: 10}
 	storeForegroundTestSnapshot(t, service, thread, appserver.ThreadReadSnapshot{
 		Thread: thread, LatestTurnID: "current-turn", LatestTurnStatus: "inProgress",
 	}, time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC))
@@ -214,7 +214,7 @@ func TestCurrentCommandShowsForegroundThreadTitleStatusAndShortID(t *testing.T) 
 	if err != nil {
 		t.Fatalf("handleCommand(/current) failed: %v", err)
 	}
-	if response == nil || !strings.Contains(response.Text, "当前会话") || !strings.Contains(response.Text, "查看下载队列") || !strings.Contains(response.Text, "处理中") || !strings.Contains(response.Text, "T:01a0399e") {
+	if response == nil || !strings.Contains(response.Text, "当前会话") || !strings.Contains(response.Text, "查看下载队列") || !strings.Contains(response.Text, "处理中") || !strings.Contains(response.Text, "T:thread") {
 		t.Fatalf("response = %#v", response)
 	}
 	if strings.Contains(response.Text, thread.ID) {

@@ -27,6 +27,7 @@ const (
 	pushMessageBodyMaxRunes  = 3500
 	pushIdempotencyMaxRunes  = 200
 	pushShutdownTimeout      = 5 * time.Second
+	pushDeliveryTimeout      = 25 * time.Second
 	pushDeliveredStatePrefix = "push.delivered."
 )
 
@@ -130,12 +131,19 @@ func (s *Service) publishPush(ctx context.Context, request PushRequest) (pushRes
 	if strings.TrimSpace(delivered) != "" {
 		return pushResult{Duplicate: true}, nil
 	}
+	attempt := map[string]any{"attempted_at": s.automationNow().UTC().Format(time.RFC3339Nano)}
+	attemptData, _ := json.Marshal(attempt)
+	if err := s.store.SetState(ctx, dedupeKey, string(attemptData)); err != nil {
+		return pushResult{}, fmt.Errorf("persist Telegram push attempt: %w", err)
+	}
 	rendered := renderPushMessages(request)
 	options := notifySendOptions()
 	if request.Severity == "silent" {
 		options = silentSendOptions()
 	}
-	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, rendered, nil, options)
+	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), pushDeliveryTimeout)
+	defer cancelDelivery()
+	messageIDs, err := sender.SendRenderedMessages(deliveryCtx, target.ChatID, target.TopicID, rendered, nil, options)
 	if err != nil {
 		return pushResult{}, fmt.Errorf("send Telegram push: %w", err)
 	}

@@ -21,7 +21,7 @@ Telegram supports a project-first flow: `/projects` -> project menu -> `New thre
 
 `New thread` arms a one-shot state for the current chat/topic. The next plain-text message calls App Server `thread/start` for that project cwd and then `turn/start` with the message text.
 
-`/newchat` and `/newthread` without arguments collect two separate plain-text messages: an explicit title, then the first prompt. Either stage may be cancelled with `/cancel`; the state survives a daemon restart, expires after 15 minutes, and is isolated by Telegram chat/topic. The title is written to App Server and retained as user-owned Telegram metadata. The one-line `/newchat <prompt>` and `/newthread <prompt>` forms remain supported for backward compatibility and keep their prompt-derived title fallback. Interactive `/newchat` creates a dated Codex UI Chat cwd from the explicit title under the configured Chats root before calling App Server `thread/start`; `/newthread` calls `thread/start` without a Telegram-selected cwd. App Server may still attach its default cwd to the latter.
+`/new` without arguments collects two separate plain-text messages: an explicit title, then the first prompt. Either stage may be cancelled with `/cancel`; the state survives a daemon restart, expires after 15 minutes, and is isolated by Telegram chat/topic. The title is written to App Server and retained as user-owned Telegram metadata. The one-line `/new <prompt>` form keeps its prompt-derived title fallback. Interactive `/new` creates a dated Codex UI Chat cwd from the explicit title under the configured Chats root before calling App Server `thread/start`. `/newchat` retains the same behavior and `/newthread` retains its no-Telegram-selected-cwd behavior as hidden compatibility routes.
 
 ## Domain Model
 
@@ -37,7 +37,7 @@ The daemon keeps App Server integration on stdio only:
 
 ## Testing
 
-- Unit tests cover `/projects`, project menu callbacks, `/newchat` and `/newthread` title-then-prompt collection, title write-through, cancellation, expiry, restart persistence, successful create/start, missing thread id, and recoverable `turn/start` failure.
+- Unit tests cover `/projects`, project menu callbacks, compact `/new`, compatibility creation routes, title-then-prompt collection, title write-through, cancellation, expiry, restart persistence, successful create/start, missing thread id, and recoverable `turn/start` failure.
 - Regression tests cover stale Plan choice buttons so old pending input cannot appear under a newer `[commentary]`.
 - Live Telegram E2E must use readback: project menu -> `New thread` -> prompt -> `[Final]`, plus a Plan Mode choice scenario.
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,43 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
+
+type recordedTelegramMessage struct {
+	chatID           int64
+	topicID          int64
+	userID           int64
+	text             string
+	imageContents    []string
+	replyToMessageID int64
+}
+
+type recordingTelegramService struct {
+	messages []recordedTelegramMessage
+}
+
+func (s *recordingTelegramService) HandleMessageWithLocalImages(_ context.Context, chatID, topicID, userID int64, text string, paths []string, replyToMessageID int64) (*daemon.DirectResponse, error) {
+	contents := make([]string, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		contents = append(contents, string(data))
+	}
+	s.messages = append(s.messages, recordedTelegramMessage{
+		chatID: chatID, topicID: topicID, userID: userID, text: text,
+		imageContents: contents, replyToMessageID: replyToMessageID,
+	})
+	return nil, nil
+}
+
+func (s *recordingTelegramService) HandleCallback(context.Context, int64, int64, int64, int64, string) (*daemon.DirectResponse, error) {
+	return nil, nil
+}
+
+func (s *recordingTelegramService) RegisterDirectDelivery(context.Context, int64, int64, int64, *daemon.DirectResponse) error {
+	return nil
+}
 
 func TestBotEditMessageRejectsMultiChunkPayload(t *testing.T) {
 	t.Parallel()
@@ -41,7 +79,7 @@ func TestSanitizeTelegramLogErrorRedactsBotTokenURL(t *testing.T) {
 	}
 }
 
-func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
+func TestDefaultCommandsExposeCompactNavigationCommands(t *testing.T) {
 	t.Parallel()
 
 	seen := make(map[string]bool)
@@ -53,9 +91,14 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 		seen[command.Command] = true
 		descriptions[command.Command] = command.Description
 	}
-	for _, command := range []string{"home", "current", "inbox", "newchat", "newthread", "cancel", "title", "archive", "unarchive", "release"} {
+	for _, command := range []string{"h", "new", "t", "c", "inbox", "cancel", "title", "a", "un", "m", "sm", "speed", "release"} {
 		if !seen[command] {
 			t.Fatalf("defaultCommands must expose /%s in the Telegram command menu", command)
+		}
+	}
+	for _, command := range []string{"home", "threads", "current", "archive", "unarchive", "newchat", "newthread"} {
+		if seen[command] {
+			t.Fatalf("defaultCommands must keep legacy /%s routeable but hidden from the compact Telegram menu", command)
 		}
 	}
 	if seen["default"] {
@@ -139,6 +182,32 @@ func TestBotSendRenderedMessagesFallsBackToPlainEntities(t *testing.T) {
 	}
 	if _, ok := second["parse_mode"]; ok {
 		t.Fatalf("fallback parse_mode = %#v, want omitted", second["parse_mode"])
+	}
+}
+
+func TestBotSendRenderedMessagesDoesNotRetryNonFormattingFailure(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":502,"description":"Bad Gateway"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	bot := &Bot{client: client}
+	_, err := bot.SendRenderedMessages(context.Background(), 42, 0, []model.RenderedMessage{{
+		Text:     "formatted",
+		Entities: []model.MessageEntity{{Type: "code", Offset: 0, Length: 9}},
+	}}, nil, model.SendOptions{})
+	if err == nil {
+		t.Fatal("SendRenderedMessages succeeded, want upstream error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want one attempt for a non-formatting failure", calls)
 	}
 }
 
@@ -270,6 +339,100 @@ func TestBotPurePhotoIsDownloadedAndRoutedInsteadOfIgnored(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("scheduled cleanup did not remove temporary photo inputs: %#v", entries)
+	}
+}
+
+func TestBotCaptionedMediaGroupDispatchesOnceWithEveryPhoto(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/getFile":
+			var request struct {
+				FileID string `json:"file_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"ok":true,"result":{"file_id":%q,"file_size":16,"file_path":%q}}`, request.FileID, "photos/"+request.FileID+".jpg")
+		case "/photos/photo-1.jpg", "/photos/photo-2.jpg", "/photos/photo-3.jpg":
+			_, _ = w.Write([]byte(strings.TrimSuffix(filepath.Base(r.URL.Path), ".jpg")))
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	cfg := config.Config{Paths: config.Paths{DataDir: filepath.Join(root, "data")}}
+	client := NewClient("token")
+	client.baseURL = server.URL
+	client.fileBaseURL = server.URL
+	service := &recordingTelegramService{}
+	var flushes []func()
+	var retained []string
+	bot := &Bot{
+		cfg:     cfg,
+		client:  client,
+		service: service,
+		logger:  log.New(io.Discard, "", 0),
+		scheduleMediaGroupFlush: func(_ time.Duration, flush func()) {
+			flushes = append(flushes, flush)
+		},
+		schedulePhotoCleanup: func(paths []string, _ time.Duration) {
+			retained = append([]string(nil), paths...)
+		},
+	}
+
+	messages := []Message{
+		{MessageID: 12, MediaGroupID: "album-1", From: &User{ID: 7}, Chat: Chat{ID: 42}, MessageThreadID: 9, Photo: []PhotoSize{{FileID: "photo-3", Width: 900, Height: 600}}},
+		{MessageID: 10, MediaGroupID: "album-1", From: &User{ID: 7}, Chat: Chat{ID: 42}, MessageThreadID: 9, Caption: "综合分析这三张图", ReplyToMessage: &Message{MessageID: 99}, Photo: []PhotoSize{{FileID: "photo-1", Width: 900, Height: 600}}},
+		{MessageID: 11, MediaGroupID: "album-1", From: &User{ID: 7}, Chat: Chat{ID: 42}, MessageThreadID: 9, Photo: []PhotoSize{{FileID: "photo-2", Width: 900, Height: 600}}},
+	}
+	for _, message := range messages {
+		if err := bot.handleMessage(context.Background(), message); err != nil {
+			t.Fatalf("handleMessage(%d) failed: %v", message.MessageID, err)
+		}
+	}
+	if got, want := len(flushes), 3; got != want {
+		t.Fatalf("scheduled flushes = %d, want %d", got, want)
+	}
+	if len(service.messages) != 0 {
+		t.Fatalf("media group dispatched before quiet period: %#v", service.messages)
+	}
+	for _, flush := range flushes {
+		flush()
+	}
+
+	if got, want := len(service.messages), 1; got != want {
+		t.Fatalf("service calls = %d, want %d", got, want)
+	}
+	message := service.messages[0]
+	if message.chatID != 42 || message.topicID != 9 || message.userID != 7 || message.replyToMessageID != 99 {
+		t.Fatalf("routed media group = %#v", message)
+	}
+	if got, want := message.text, "综合分析这三张图"; got != want {
+		t.Fatalf("caption = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(message.imageContents, ","), "photo-1,photo-2,photo-3"; got != want {
+		t.Fatalf("image contents = %q, want %q", got, want)
+	}
+	if got, want := len(retained), 3; got != want {
+		t.Fatalf("retained images = %d, want %d", got, want)
+	}
+	removeTelegramTempFiles(retained)
+}
+
+func TestTelegramMessageDecodesMediaGroupID(t *testing.T) {
+	t.Parallel()
+
+	var message Message
+	if err := json.Unmarshal([]byte(`{"message_id":1,"media_group_id":"album-42","from":{"id":7},"chat":{"id":42},"photo":[{"file_id":"photo","width":10,"height":10}]}`), &message); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if got, want := message.MediaGroupID, "album-42"; got != want {
+		t.Fatalf("MediaGroupID = %q, want %q", got, want)
 	}
 }
 

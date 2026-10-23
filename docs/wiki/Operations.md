@@ -58,6 +58,26 @@ Until a safe restart command exists, prefer this order:
 
 Future restart work should implement a drain/guard path that refuses or delays restart while Telegram-origin turns are active. More invasive designs, such as a separate App Server broker process or reattaching to a turn after daemon death, require a separate ADR.
 
+## Windows Codex Runtime Failover
+
+Windows enables managed runtime mode by default. On first daemon start,
+codex-tg copies the complete configured/Desktop CLI bundle under
+`~/.codex-tg/codex-runtime`. Later Desktop updates can remove their old
+content-addressed directory without breaking Telegram.
+
+The daemon checks for a newer complete local bundle every six hours. Promotion
+affects only the next daemon start. That first start must connect both live and
+poll App Server sessions; failure swaps the active pointer back to the previous
+confirmed bundle and retries once. All probes and child processes are windowless.
+
+Use `CTR_GO_CODEX_RUNTIME_MANAGED=false` only when an external package manager
+already provides a stable complete bundle. `ctr-go status` reports the managed
+binary after the private runtime has been initialized.
+
+`ctr-go runtime status` inspects the active/previous selection,
+`ctr-go runtime sync` performs an immediate non-disruptive discovery and stage,
+and `ctr-go runtime rollback` swaps the pointers for the next daemon start.
+
 ## Common Issue
 
 Telegram `409 Conflict` means another process is polling the same bot token. Stop the other consumer before starting `codex-tg`.
@@ -77,7 +97,14 @@ keep their existing overrides.
 
 The MCP adapter manages standalone cron definitions while the daemon polls and
 claims due time slots. Every run starts a new thread in the TG-private App
-Server, so results and input/approval requests use the normal Telegram observer.
+Server and inherits the same SQLite-backed settings as conversation turns;
+operators view them with `/m` and edit them with `/sm`. Task definitions do not
+select an independent model. Results
+and input/approval requests use the normal Telegram observer.
+Schedules use local-time RRULEs with hourly, daily, weekly, and monthly
+frequencies. Monthly rules use `BYMONTHDAY=1..31`; a date absent from a month is
+skipped. A successful run that returns only `DONT_NOTIFY` is recorded without a
+Telegram push.
 If a task does not start, check `automation.scheduler.last_tick_at` and
 `automation.scheduler.last_error` in `ctr-go doctor`, verify the live App Server
 is ready, and verify an observer target can be resolved. A task edited after its

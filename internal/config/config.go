@@ -48,6 +48,9 @@ type Config struct {
 	Paths                       Paths
 	CodexBin                    string
 	CodexHome                   string
+	ManagedCodexRuntime         bool
+	CodexRuntimeDir             string
+	CodexRuntimeSyncInterval    time.Duration
 	AutomationsDir              string
 	AppServerListen             string
 	FullAccess                  bool
@@ -137,6 +140,9 @@ func fromSource(source envSource) Config {
 		Paths:                       paths,
 		CodexBin:                    codexBin,
 		CodexHome:                   source.path("CTR_GO_CODEX_HOME", ""),
+		ManagedCodexRuntime:         source.bool("CTR_GO_CODEX_RUNTIME_MANAGED", runtime.GOOS == "windows"),
+		CodexRuntimeDir:             source.path("CTR_GO_CODEX_RUNTIME_DIR", filepath.Join(paths.Home, "codex-runtime")),
+		CodexRuntimeSyncInterval:    source.durationSeconds("CTR_GO_CODEX_RUNTIME_SYNC_SECONDS", 6*time.Hour),
 		AutomationsDir:              source.path("CTR_GO_AUTOMATIONS_DIR", filepath.Join(paths.Home, "automations")),
 		AppServerListen:             listen,
 		FullAccess:                  source.bool("CTR_GO_FULL_ACCESS", false),
@@ -169,6 +175,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		DBPath                      string  `json:"db_path"`
 		CodexBin                    string  `json:"codex_bin"`
 		CodexHome                   string  `json:"codex_home"`
+		ManagedCodexRuntime         bool    `json:"managed_codex_runtime"`
+		CodexRuntimeDir             string  `json:"codex_runtime_dir"`
+		CodexRuntimeSyncSeconds     float64 `json:"codex_runtime_sync_seconds"`
 		AutomationsDir              string  `json:"automations_dir"`
 		AppServerListen             string  `json:"app_server_listen"`
 		FullAccess                  bool    `json:"full_access"`
@@ -194,6 +203,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		DBPath:                      c.Paths.DBPath,
 		CodexBin:                    c.CodexBin,
 		CodexHome:                   c.CodexHome,
+		ManagedCodexRuntime:         c.ManagedCodexRuntime,
+		CodexRuntimeDir:             c.CodexRuntimeDir,
+		CodexRuntimeSyncSeconds:     c.CodexRuntimeSyncInterval.Seconds(),
 		AutomationsDir:              c.AutomationsDir,
 		AppServerListen:             c.AppServerListen,
 		FullAccess:                  c.FullAccess,

@@ -43,6 +43,12 @@ a dedicated `CTR_GO_CODEX_HOME`: one live session for writes and events, plus a
 read-only poll session for authoritative reconciliation. These children do not
 reuse the Windows Codex Desktop App Server or its mutable runtime files.
 
+On Windows, the CLI executable bundle is also copied into a codex-tg-owned
+managed runtime. Active and previous bundle pointers isolate daemon availability
+from Desktop's content-addressed update cleanup. Background discovery may stage
+a newer complete bundle for the next restart, but it never interrupts the
+currently running App Server children. See ADR-024.
+
 Desktop and Telegram keep separate sessions, state/history SQLite files, writer
 locks, caches, and App Server lifecycles. Explicit links may share static
 capabilities such as Skills, plugins, packages, and global instructions. Durable

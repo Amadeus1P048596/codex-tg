@@ -19,6 +19,7 @@ const (
 	automationPollInterval = 15 * time.Second
 	automationStatePrefix  = "automation.run."
 	automationThreadPrefix = "automation.thread."
+	automationDontNotify   = "DONT_NOTIFY"
 )
 
 type automationRunState struct {
@@ -45,6 +46,17 @@ func (s *Service) isAutomationExecutionThread(ctx context.Context, threadID stri
 	}
 	taskID, err := s.store.GetState(ctx, automationThreadStateKey(threadID))
 	return err == nil && strings.TrimSpace(taskID) != ""
+}
+
+// Only the currently claimed occurrence may borrow the transient-interrupt
+// protection. Older hidden threads remain pollable but cannot publish anew.
+func (s *Service) isCurrentAutomationTurn(ctx context.Context, threadID, turnID string) bool {
+	taskID, err := s.store.GetState(ctx, automationThreadStateKey(threadID))
+	if err != nil || taskID == "" || turnID == "" {
+		return false
+	}
+	run := s.loadAutomationRunState(ctx, taskID)
+	return run.ThreadID == threadID && run.TurnID == turnID
 }
 
 func (s *Service) automationLoop(ctx context.Context) {
@@ -199,10 +211,7 @@ func (s *Service) startAutomationTurn(ctx context.Context, task automation.Task,
 		s.logAppServerCall("ThreadSetName", started, titleErr, live, lifecycleFields{"operation": "automation_title", "task_id": task.ID, "thread_id": thread.ID})
 	}
 
-	options := appserver.TurnStartOptions{
-		Model:           strings.TrimSpace(task.Model),
-		ReasoningEffort: normalizeReasoningEffort(task.ReasoningEffort),
-	}
+	options := s.turnStartOptions(ctx, "", nil)
 	requestCtx, cancel = context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	started = time.Now()
 	turnPayload, err := live.TurnStart(requestCtx, thread.ID, task.Prompt, thread.CWD, options)
@@ -269,6 +278,9 @@ func (s *Service) updateAutomationRunFromSnapshot(ctx context.Context, thread mo
 	if state.ThreadID != "" && state.ThreadID != thread.ID {
 		return
 	}
+	if state.TurnID != "" && state.TurnID != snapshot.LatestTurnID {
+		return
+	}
 	waiting := snapshot.WaitingOnApproval || snapshot.WaitingOnReply || snapshot.PlanPrompt != nil
 	next := notificationStateForStatus(readableStatus(snapshot.LatestTurnStatus, thread.Status), waiting)
 	switch next {
@@ -301,6 +313,17 @@ func (s *Service) syncAutomationPush(ctx context.Context, thread model.Thread, s
 	if err != nil || strings.TrimSpace(taskID) == "" {
 		return false
 	}
+	run := s.loadAutomationRunState(ctx, taskID)
+	if (run.ThreadID != "" && run.ThreadID != thread.ID) ||
+		(run.TurnID != "" && run.TurnID != snapshot.LatestTurnID) {
+		return true
+	}
+	// Poll and live projections can disagree briefly. Do not let an ambiguous
+	// interrupted projection escape as a push before the normal terminal gate.
+	decision, gateErr := s.decideTelegramOriginEmptyInterruptedTerminal(ctx, snapshot, s.automationNow())
+	if gateErr != nil || decision.Action == terminalGateDefer {
+		return true
+	}
 	s.updateAutomationRunFromSnapshot(ctx, thread, snapshot)
 	state := notificationStateForStatus(
 		readableStatus(snapshot.LatestTurnStatus, thread.Status),
@@ -321,11 +344,19 @@ func (s *Service) syncAutomationPush(ctx context.Context, thread model.Thread, s
 	if state == notificationCompleted && strings.EqualFold(strings.TrimSpace(task.NotificationPolicy), "failed_runs_only") {
 		return true
 	}
-	run := s.loadAutomationRunState(ctx, taskID)
+	if state == notificationCompleted && snapshot != nil && strings.TrimSpace(snapshot.LatestFinalText) == automationDontNotify {
+		return true
+	}
+	run = s.loadAutomationRunState(ctx, taskID)
 	body := automationPushBody(state, snapshot, run)
 	conversationTitle := s.automationConversationTitle(ctx, task)
-	fingerprint := firstNonEmpty(snapshot.LatestFinalFP, snapshot.LatestProgressFP, snapshot.LatestTurnID, run.TurnID)
-	idempotencyKey := fmt.Sprintf("automation:%s:%d:%s:%s:%s", task.ID, run.SlotUnixMilli, firstNonEmpty(snapshot.LatestTurnID, run.TurnID), state, fingerprint)
+	phase := "terminal"
+	if state == notificationNeedsInput {
+		phase = "needs_input"
+	}
+	// Content fingerprints vary between live events and poll snapshots. They
+	// are not a delivery identity: one occurrence gets one terminal push.
+	idempotencyKey := fmt.Sprintf("automation:%s:%d:%s:%s:%s", task.ID, run.SlotUnixMilli, thread.ID, firstNonEmpty(snapshot.LatestTurnID, run.TurnID), phase)
 	_, err = s.publishPush(ctx, PushRequest{
 		Source:            "codex-tg 定时任务",
 		Title:             compactPushText("定时任务 · "+task.Name, pushTitleMaxRunes),

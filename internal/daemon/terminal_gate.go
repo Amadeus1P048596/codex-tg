@@ -244,7 +244,7 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 		return decision, nil
 	}
 
-	if !s.isTelegramOriginTurn(ctx, threadID, turnID) {
+	if !s.isTelegramOriginTurn(ctx, threadID, turnID) && !s.isCurrentAutomationTurn(ctx, threadID, turnID) {
 		decision.Reason = "not_telegram_origin"
 		return decision, nil
 	}
