@@ -489,3 +489,25 @@ func openTestStore(t *testing.T) *Store {
 	})
 	return store
 }
+
+func TestApprovalReuseReplacesRoutingIdentity(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	for _, id := range []string{"old-thread", "new-thread"} {
+		a := model.PendingApproval{RequestID: "0", ThreadID: id, TurnID: id + "-turn", ItemID: id + "-item", PromptKind: "approval", Question: id, Status: "pending", PayloadJSON: "{}", UpdatedAt: model.NowString()}
+		if err := s.SavePendingApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.GetPendingApproval(ctx, "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ThreadID != "new-thread" || got.TurnID != "new-thread-turn" || got.ItemID != "new-thread-item" || got.Question != "new-thread" {
+		t.Fatalf("stale routing: %#v", got)
+	}
+}

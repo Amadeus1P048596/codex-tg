@@ -91,7 +91,11 @@ func (b *Bot) Start(ctx context.Context) error {
 		return err
 	}
 	b.me = me
-	if err := b.client.SetMyCommands(startCtx, defaultCommands()); err != nil {
+	commands := defaultCommands()
+	if b.cfg.TelegramCommandMenuDisabled {
+		commands = []BotCommand{}
+	}
+	if err := b.client.SetMyCommands(startCtx, commands); err != nil {
 		b.logger.Printf("telegram setMyCommands failed: %s", sanitizeTelegramLogError(err))
 	}
 	b.logger.Printf("telegram bot ready: @%s", me.Username)

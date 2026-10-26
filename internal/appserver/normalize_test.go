@@ -1156,3 +1156,20 @@ func TestNormalizeAppServerLiveEventMapsLegacyExecEvent(t *testing.T) {
 		t.Fatalf("Label = %q, want %q", got, want)
 	}
 }
+
+func TestTerminalTimingFreezesAcrossPolls(t *testing.T) {
+	for _, status := range []string{"failed", "interrupted", "completed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			start := time.Date(2026, 10, 26, 2, 51, 0, 0, time.UTC)
+			current := ThreadReadSnapshot{LatestTurnID: "turn-freeze", LatestTurnStatus: status, LatestTurnStartedAt: start.Format(time.RFC3339Nano)}
+			first := CompactSnapshot(nil, current, start.Add(4*time.Minute))
+			later := CompactSnapshot(&first, current, start.Add(4*time.Hour))
+			var a, b ThreadReadSnapshot
+			_ = json.Unmarshal(first.CompactJSON, &a)
+			_ = json.Unmarshal(later.CompactJSON, &b)
+			if a.LatestTurnUpdatedAt != b.LatestTurnUpdatedAt {
+				t.Fatalf("terminal timer advanced: %s -> %s", a.LatestTurnUpdatedAt, b.LatestTurnUpdatedAt)
+			}
+		})
+	}
+}

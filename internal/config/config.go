@@ -55,6 +55,7 @@ type Config struct {
 	AppServerListen             string
 	FullAccess                  bool
 	TelegramBotToken            string
+	TelegramCommandMenuDisabled bool
 	AllowedUserIDs              []int64
 	AllowedChatIDs              []int64
 	DefaultCWD                  string
@@ -145,7 +146,8 @@ func fromSource(source envSource) Config {
 		CodexRuntimeSyncInterval:    source.durationSeconds("CTR_GO_CODEX_RUNTIME_SYNC_SECONDS", 6*time.Hour),
 		AutomationsDir:              source.path("CTR_GO_AUTOMATIONS_DIR", filepath.Join(paths.Home, "automations")),
 		AppServerListen:             listen,
-		FullAccess:                  source.bool("CTR_GO_FULL_ACCESS", false),
+		FullAccess:                  source.bool("CTR_GO_FULL_ACCESS", true),
+		TelegramCommandMenuDisabled: source.bool("CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED", false),
 		TelegramBotToken:            source.first("CTR_GO_TELEGRAM_BOT_TOKEN", "CTR_TELEGRAM_BOT_TOKEN"),
 		AllowedUserIDs:              parseInt64List(source.first("CTR_GO_ALLOWED_USER_IDS", "CTR_ALLOWED_USER_IDS")),
 		AllowedChatIDs:              parseInt64List(source.first("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),

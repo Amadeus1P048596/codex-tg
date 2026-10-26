@@ -20,6 +20,13 @@ respective owners.
 
 ## What This Fork Changes
 
+- Defaults new, resumed and forked Telegram sessions to full access without
+  approvals, with an explicit configuration opt-out and isolated runtime state.
+- Scopes approval identities to App Server connections, delivers separate
+  permission notices, and freezes failed/cancelled/completed run durations.
+- Exposes optional slash-menu disabling while keeping menu registration enabled
+  by default and preserving all typed commands.
+
 - Replaces Telegram's stream of raw tool/output cards with one per-turn
   activity card, including a typing grace period, throttled edits, aggregated
   user-facing activity, and in-place terminal state.

@@ -108,3 +108,16 @@ Nil-safe rendering is part of turn lifecycle normalization because the bad state
 - This does not treat every steer failure as safe to retry with `turn/start`.
 - This does not rewrite old Telegram history or delete already-sent duplicate cards automatically.
 - This does not make forced daemon termination transparent to active Telegram-origin turns.
+
+## Approval identity and terminal timestamps (2026-10-26)
+
+- Server request IDs are process-local RPC IDs. Public approval identities include
+  a random client namespace and connection generation; responses translate back
+  to the original RPC ID, preserving its JSON type. Stale, resolved and previous
+  generation requests must not be sent to a new process.
+- On storage replacement, every approval routing field is updated together.
+  Startup invalidates previous-process pending requests.
+- For the same turn, once terminal status is observed, preserve the first terminal
+  timestamp across later terminal polls that omit an explicit end time. A genuine
+  return to active state may resume timing; the next terminal transition freezes
+  again. New turns never inherit another turn's end timestamp.

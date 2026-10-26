@@ -467,7 +467,11 @@ func applyLatestTurnTiming(previous *model.ThreadSnapshotState, current *ThreadR
 		}
 	}
 	if strings.TrimSpace(current.LatestTurnUpdatedAt) == "" {
-		current.LatestTurnUpdatedAt = observedText
+		if sameTurn && terminalTimingStatus(current.LatestTurnStatus) && terminalTimingStatus(previousSnapshot.LatestTurnStatus) && previousSnapshot.LatestTurnUpdatedAt != "" {
+			current.LatestTurnUpdatedAt = previousSnapshot.LatestTurnUpdatedAt
+		} else {
+			current.LatestTurnUpdatedAt = observedText
+		}
 	}
 }
 
@@ -1374,5 +1378,14 @@ func int64Value(value any) int64 {
 		return typed
 	default:
 		return 0
+	}
+}
+
+func terminalTimingStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "interrupted", "cancelled", "canceled":
+		return true
+	default:
+		return false
 	}
 }

@@ -788,3 +788,32 @@ go build -buildvcs=false ./...
 git diff --check
 git grep -nE "BOT_TOKEN|TELEGRAM_BOT_TOKEN|api_hash|api_id|phone|password|secret|\\.session|\\.sqlite|\\.env|C:\\\\Users\\\\<private-user>" -- ':!go.sum' ':!.env' ':!.env.example' ':!.git'
 ```
+
+## Optional Telegram command menu
+
+Contract: `docs/research/contract-matrix.md` optional command menu.
+Regression: `internal/telegram/bot_test.go::TestBotStartCommandMenuDisabled`
+checks both normal startup registration and empty-menu startup.
+
+## Approval routing and frozen terminal timing
+
+ADRs: ADR-012 approval identity/timing addendum and ADR-015 approval notification.
+
+- `internal/appserver/client_test.go::TestServerRequestIdentitySurvivesRPCIDReuse`
+- `internal/appserver/client_test.go::TestResolvedServerRequestUsesScopedIdentity`
+- `internal/storage/store_test.go::TestApprovalReuseReplacesRoutingIdentity`
+- `internal/appserver/normalize_test.go::TestTerminalTimingFreezesAcrossPolls`
+- `internal/daemon/approval_notice_test.go::TestApprovalNoticeIsSeparateNotifyingAndDeduplicated`
+- `internal/daemon/approval_notice_test.go::TestResolvedApprovalNoticeIsNotDelivered`
+- `internal/daemon/approval_notice_test.go::TestApprovalEventQueuesIndependentNotice`
+- `internal/daemon/approval_notice_test.go::TestApprovalBeforeActivityCardUsesBoundTopic`
+
+## Default runtime permissions
+
+ADR: `docs/adr/ADR-025-default-full-access.md`.
+
+- `internal/config/config_test.go::TestFullAccessDefaultsOnAndSupportsExplicitOptOut`
+- `internal/appserver/client_test.go::TestFullAccessAppliesToNewAndResumedThreads`
+- `cmd/ctr-go/main_test.go::TestRunInitWritesPrivateConfigAndRefusesOverwrite`
+- `cmd/ctr-go/service_test.go::TestServiceInstallNonInteractiveWritesConfigAndLaunchAgent`
+- `cmd/ctr-go/service_test.go::TestServiceSetupPreservesPermissionOptOut`

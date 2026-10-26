@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"regexp"
 	"strconv"
@@ -244,6 +245,9 @@ func (s *Service) Start(ctx context.Context) error {
 		_ = s.store.SetState(ctx, "daemon.last_error", message)
 		return err
 	}
+
+	// Requests from a previous process cannot be answered by the new App Server.
+	_, _ = s.store.MarkAllPendingApprovals(runCtx, "needs_recheck")
 
 	_ = s.store.SetState(runCtx, "daemon.phase", "ready")
 	_ = s.store.SetState(runCtx, "daemon.ready", "true")
@@ -804,7 +808,13 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 	}
 	liveToolSnapshot, hasLiveToolSnapshot := appserver.ToolSnapshotFromLiveNotification(event, model.Thread{ID: threadID})
 	if approval, ok := appserver.PendingApprovalFromServerRequest(event); ok {
-		_ = s.store.SavePendingApproval(ctx, *approval)
+		if err := s.store.SavePendingApproval(ctx, *approval); err != nil {
+			s.setError(ctx, err)
+			return
+		}
+		if approval.PromptKind == "approval" {
+			s.enqueueApprovalNotice(ctx, *approval)
+		}
 		if approval.ThreadID != "" {
 			if refreshed, err := s.refreshThread(ctx, live, approval.ThreadID); err == nil && refreshed != nil {
 				_ = refreshed
@@ -1454,7 +1464,22 @@ func (s *Service) processDeliveryBatch(ctx context.Context) {
 			continue
 		}
 		s.logTelegramRenderContainsNil(payload.ThreadID, payload.TurnID, "delivery", 0, payload.Text)
-		messageID, err := sender.SendMessage(ctx, item.ChatID, item.TopicID, payload.Text, payload.Buttons, silentSendOptions())
+		options := silentSendOptions()
+		if item.Kind == "approval" {
+			pending, getErr := s.store.GetPendingApproval(ctx, payload.EventID)
+			if getErr != nil {
+				_ = s.store.RecordDeliveryAttempt(ctx, item.ID, item.RetryCount+1, "approval_lookup_error", getErr.Error())
+				_ = s.store.FailDelivery(ctx, item.ID, item.RetryCount+1, time.Now().UTC().Add(s.cfg.DeliveryRetryBase), getErr.Error(), item.RetryCount+1 >= s.cfg.DeliveryMaxAttempts)
+				s.setError(ctx, getErr)
+				continue
+			}
+			if pending == nil || pending.Status != "pending" {
+				_ = s.store.CompleteDelivery(ctx, item.ID)
+				continue
+			}
+			options = notifySendOptions()
+		}
+		messageID, err := sender.SendMessage(ctx, item.ChatID, item.TopicID, payload.Text, payload.Buttons, options)
 		if err != nil {
 			attempt := item.RetryCount + 1
 			_ = s.store.RecordDeliveryAttempt(ctx, item.ID, attempt, "send_error", err.Error())
@@ -2805,8 +2830,8 @@ func (s *Service) approve(ctx context.Context, requestID, decision string) (*Dir
 	if err != nil {
 		return nil, err
 	}
-	if approval == nil {
-		return &DirectResponse{Text: fmt.Sprintf("Unknown approval request: %s", requestID)}, nil
+	if approval == nil || approval.Status != "pending" {
+		return &DirectResponse{CallbackText: "审批已处理或已失效，请查看当前会话。"}, nil
 	}
 	s.mu.RLock()
 	live := s.live
@@ -3790,22 +3815,45 @@ func (s *Service) renderPendingApproval(ctx context.Context, approval model.Pend
 	}
 	lines := []string{
 		s.visualHeader(ctx, "Approval", thread, approval.TurnID),
-		strings.TrimSpace(approval.Question),
+		html.EscapeString(strings.TrimSpace(approval.Question)),
 		"",
 		fmt.Sprintf("/approve %s", approval.RequestID),
 		fmt.Sprintf("/deny %s", approval.RequestID),
 		fmt.Sprintf("/show %s", approval.ThreadID),
 	}
-	buttons := [][]model.ButtonSpec{
-		{
-			s.callbackButton(ctx, "允许", "approve", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
-			s.callbackButton(ctx, "本次会话允许", "approve_session", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
-		},
-		{
-			s.callbackButton(ctx, "拒绝", "deny", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
-			s.callbackButton(ctx, "取消", "cancel", approval.ThreadID, approval.TurnID, approval.RequestID, nil),
-		},
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(approval.PayloadJSON), &payload)
+	if reason := payloadMapString(payload, "reason"); reason != "" {
+		lines = append(lines, html.EscapeString(reason))
 	}
+	if command := payloadMapString(payload, "command"); command != "" {
+		if len([]rune(command)) > 1200 {
+			command = string([]rune(command)[:1200]) + "…"
+		}
+		lines = append(lines, "<pre>"+html.EscapeString(command)+"</pre>")
+	}
+	decisions := map[string]bool{}
+	if available, ok := payload["availableDecisions"].([]any); ok {
+		for _, value := range available {
+			if decision, ok := value.(string); ok {
+				decisions[decision] = true
+			}
+		}
+	} else {
+		for _, decision := range []string{"accept", "acceptForSession", "decline", "cancel"} {
+			decisions[decision] = true
+		}
+	}
+	buttons := [][]model.ButtonSpec{}
+	for _, choice := range []struct{ label, action, decision string }{
+		{"允许", "approve", "accept"}, {"本次会话允许", "approve_session", "acceptForSession"},
+		{"拒绝", "deny", "decline"}, {"取消", "cancel", "cancel"},
+	} {
+		if decisions[choice.decision] {
+			buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, choice.label, choice.action, approval.ThreadID, approval.TurnID, approval.RequestID, nil)})
+		}
+	}
+
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons, ThreadID: approval.ThreadID, TurnID: approval.TurnID, ItemID: approval.ItemID, EventID: approval.RequestID}
 }
 

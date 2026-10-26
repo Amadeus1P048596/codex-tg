@@ -8,6 +8,12 @@ This file now serves two purposes:
 - target Telegram observer/UI v2 deltas that the Go runtime is expected to adopt
 - v0.5 Codex Control Plane contracts that future adapters should consume
 
+## Optional command menu
+
+`CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED=true` synchronizes an empty default
+Telegram command menu on every startup. Typed commands remain available.
+Scoped or language-specific menus are cleared separately during migration.
+
 ## Commands
 
 - `/start`
@@ -408,3 +414,11 @@ Plan prompt payload fields:
 - Plan answer buttons must stay scoped to their Plan turn; a stale pending input from an older turn must not be attached to a newer `[commentary]` card
 - late poll-discovered `[User]` prompts must edit the existing placeholder, not append below live trio messages
 - duplicate live+poll sync must not create multiple `[Plan]` cards for the same prompt fingerprint
+
+## Permission approval and terminal duration
+
+Permission approval requests send a separate notifying message with the reason,
+command and decision buttons. Approval identities are scoped to one App Server
+connection; stale buttons cannot approve another request after a restart.
+Terminal elapsed duration freezes when completion, failure or cancellation is
+first observed and remains stable across repeated polling.

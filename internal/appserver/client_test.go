@@ -2,6 +2,7 @@ package appserver
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -435,4 +436,88 @@ func writeFakeAppServer(t *testing.T, root, body string) string {
 		t.Fatalf("WriteFile(fake app-server) failed: %v", err)
 	}
 	return path
+}
+
+func TestServerRequestIdentitySurvivesRPCIDReuse(t *testing.T) {
+	client := NewClient("codex", "stdio://", t.TempDir(), time.Second)
+	events := client.Subscribe()
+	client.started = true
+	client.generation = 1
+	request := map[string]any{"id": float64(0), "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "thread-one"}}
+	client.handlePayload(request, 1)
+	first := <-events
+	client.generation = 2
+	client.handlePayload(request, 2)
+	second := <-events
+	other := NewClient("codex", "stdio://", t.TempDir(), time.Second)
+	otherEvents := other.Subscribe()
+	other.started = true
+	other.generation = 2
+	other.handlePayload(request, 2)
+	third := <-otherEvents
+	if rpcString(first.ID) == rpcString(second.ID) || rpcString(second.ID) == rpcString(third.ID) {
+		t.Fatal("server request IDs collide across sessions")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	client.stdin = w
+	if err := client.RespondServerRequest(context.Background(), rpcString(first.ID), map[string]any{"decision": "accept"}); err == nil {
+		t.Fatal("stale approval accepted")
+	}
+	if err := client.RespondServerRequest(context.Background(), rpcString(second.ID), map[string]any{"decision": "accept"}); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		ID any `json:"id"`
+	}
+	if err := json.NewDecoder(r).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := response.ID.(float64); !ok || id != 0 {
+		t.Fatalf("RPC id type changed: %#v", response.ID)
+	}
+	if err := client.RespondServerRequest(context.Background(), rpcString(second.ID), map[string]any{"decision": "accept"}); err == nil {
+		t.Fatal("resolved approval accepted twice")
+	}
+}
+
+func TestResolvedServerRequestUsesScopedIdentity(t *testing.T) {
+	client := NewClient("codex", "stdio://", t.TempDir(), time.Second)
+	events := client.Subscribe()
+	client.started = true
+	client.generation = 1
+	client.handlePayload(map[string]any{"id": float64(0), "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "thread"}}, 1)
+	request := <-events
+	client.handlePayload(map[string]any{"method": "serverRequest/resolved", "params": map[string]any{"requestId": float64(0)}}, 1)
+	resolved := <-events
+	if rpcString(resolved.Params["requestId"]) != rpcString(request.ID) {
+		t.Fatal("resolution lost scoped approval identity")
+	}
+	if _, ok := client.serverRequestIDs[rpcString(request.ID)]; ok {
+		t.Fatal("resolved request still live")
+	}
+}
+
+func TestFullAccessAppliesToNewAndResumedThreads(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		client := NewClient("codex", "stdio://", t.TempDir(), time.Second, ClientOptions{FullAccess: enabled})
+		for operation, params := range map[string]map[string]any{"start": client.threadStartParams("workspace"), "resume": client.threadResumeParams("old-thread", "workspace")} {
+			if enabled {
+				if params["approvalPolicy"] != "never" || params["sandbox"] != "danger-full-access" {
+					t.Fatalf("%s does not apply full access: %#v", operation, params)
+				}
+			} else {
+				if _, exists := params["approvalPolicy"]; exists {
+					t.Fatalf("%s overrides configured approvals when opted out", operation)
+				}
+				if _, exists := params["sandbox"]; exists {
+					t.Fatalf("%s overrides configured sandbox when opted out", operation)
+				}
+			}
+		}
+	}
 }

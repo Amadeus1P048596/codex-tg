@@ -453,14 +453,16 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 	}
 
 	values := map[string]string{
-		"CTR_GO_TELEGRAM_BOT_TOKEN": token,
-		"CTR_GO_ALLOWED_USER_IDS":   allowedUsers,
-		"CTR_GO_DEFAULT_CWD":        defaultCWD,
-		"CTR_GO_CODEX_CHATS_ROOT":   chatsRoot,
-		"CTR_GO_CODEX_BIN":          selectedCodexBin,
-		"CTR_GO_CODEX_HOME":         codexHome,
-		"CTR_GO_AUTOMATIONS_DIR":    automationsDir,
-		"CTR_GO_NOTIFY_NEW_RUN":     notifyNewRun,
+		"CTR_GO_TELEGRAM_BOT_TOKEN":             token,
+		"CTR_GO_ALLOWED_USER_IDS":               allowedUsers,
+		"CTR_GO_DEFAULT_CWD":                    defaultCWD,
+		"CTR_GO_CODEX_CHATS_ROOT":               chatsRoot,
+		"CTR_GO_CODEX_BIN":                      selectedCodexBin,
+		"CTR_GO_CODEX_HOME":                     codexHome,
+		"CTR_GO_AUTOMATIONS_DIR":                automationsDir,
+		"CTR_GO_NOTIFY_NEW_RUN":                 notifyNewRun,
+		"CTR_GO_FULL_ACCESS":                    "true",
+		"CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED": "false",
 	}
 	if strings.TrimSpace(allowedChats) != "" {
 		values["CTR_GO_ALLOWED_CHAT_IDS"] = allowedChats
@@ -470,6 +472,7 @@ func runInit(args []string, in io.Reader, out io.Writer) error {
 	}
 
 	_, _ = fmt.Fprintf(out, "\nWrote %s\n", path)
+	_, _ = fmt.Fprintln(out, "Full access: enabled (set CTR_GO_FULL_ACCESS=false to use configured thread permissions).")
 	_, _ = fmt.Fprintln(out, "Next steps:")
 	_, _ = fmt.Fprintln(out, "  ctr-go doctor")
 	_, _ = fmt.Fprintln(out, "  ctr-go daemon run")

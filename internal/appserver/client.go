@@ -3,6 +3,7 @@ package appserver
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,24 +46,26 @@ type Client struct {
 	automationsDir string
 	automationCmd  string
 
-	startMu        sync.Mutex
-	rolloutPathMu  sync.Mutex
-	preparedPaths  map[string]struct{}
-	resumedPaths   map[string]struct{}
-	mu             sync.Mutex
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	stdout         io.ReadCloser
-	stderr         io.ReadCloser
-	pending        map[uint64]chan rpcResponse
-	subscribers    []chan Event
-	nextID         uint64
-	generation     uint64
-	stderrLines    []string
-	started        bool
-	readerDone     chan struct{}
-	stderrDone     chan struct{}
-	serverRequests map[string]map[string]any
+	startMu          sync.Mutex
+	rolloutPathMu    sync.Mutex
+	preparedPaths    map[string]struct{}
+	resumedPaths     map[string]struct{}
+	mu               sync.Mutex
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	stdout           io.ReadCloser
+	stderr           io.ReadCloser
+	pending          map[uint64]chan rpcResponse
+	subscribers      []chan Event
+	nextID           uint64
+	generation       uint64
+	stderrLines      []string
+	started          bool
+	readerDone       chan struct{}
+	stderrDone       chan struct{}
+	serverRequests   map[string]map[string]any
+	serverRequestIDs map[string]any
+	requestNamespace string
 }
 
 type ClientOptions struct {
@@ -82,20 +85,22 @@ func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration, op
 		automationCommand, _ = os.Executable()
 	}
 	return &Client{
-		codexBin:       codexBin,
-		codexHome:      strings.TrimSpace(clientOptions.CodexHome),
-		listenURL:      listenURL,
-		cwd:            cwd,
-		requestTimeout: requestTimeout,
-		fullAccess:     clientOptions.FullAccess,
-		automationsDir: strings.TrimSpace(clientOptions.AutomationsDir),
-		automationCmd:  automationCommand,
-		preparedPaths:  map[string]struct{}{},
-		resumedPaths:   map[string]struct{}{},
-		pending:        map[uint64]chan rpcResponse{},
-		serverRequests: map[string]map[string]any{},
-		readerDone:     make(chan struct{}),
-		stderrDone:     make(chan struct{}),
+		codexBin:         codexBin,
+		codexHome:        strings.TrimSpace(clientOptions.CodexHome),
+		listenURL:        listenURL,
+		cwd:              cwd,
+		requestTimeout:   requestTimeout,
+		fullAccess:       clientOptions.FullAccess,
+		automationsDir:   strings.TrimSpace(clientOptions.AutomationsDir),
+		automationCmd:    automationCommand,
+		preparedPaths:    map[string]struct{}{},
+		resumedPaths:     map[string]struct{}{},
+		pending:          map[uint64]chan rpcResponse{},
+		serverRequests:   map[string]map[string]any{},
+		serverRequestIDs: map[string]any{},
+		requestNamespace: rand.Text(),
+		readerDone:       make(chan struct{}),
+		stderrDone:       make(chan struct{}),
 	}
 }
 
@@ -142,6 +147,8 @@ func (c *Client) Start(ctx context.Context) error {
 	c.stderr = stderr
 	c.started = true
 	c.generation++
+	c.serverRequests = map[string]map[string]any{}
+	c.serverRequestIDs = map[string]any{}
 	generation := c.generation
 	c.readerDone = make(chan struct{})
 	c.stderrDone = make(chan struct{})
@@ -305,12 +312,18 @@ func (c *Client) RespondServerRequest(ctx context.Context, requestID string, res
 		c.mu.Unlock()
 		return errors.New("app-server is not running")
 	}
+	rawID, ok := c.serverRequestIDs[requestID]
+	if !ok || requestID != c.serverRequestKey(rawID, c.generation) {
+		c.mu.Unlock()
+		return errors.New("approval request is stale or already resolved")
+	}
 	stdin := c.stdin
+	delete(c.serverRequestIDs, requestID)
 	delete(c.serverRequests, requestID)
 	c.mu.Unlock()
 	payload, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      requestID,
+		"id":      rawID,
 		"result":  result,
 	})
 	if err != nil {
@@ -353,7 +366,9 @@ func threadListParams(limit int, cursor string, archived *bool) map[string]any {
 }
 
 func (c *Client) ThreadFork(ctx context.Context, threadID, cwd string) (map[string]any, error) {
-	result, err := c.Request(ctx, "thread/fork", threadForkParams(threadID, cwd))
+	params := threadForkParams(threadID, cwd)
+	c.applyThreadPermissions(params)
+	result, err := c.Request(ctx, "thread/fork", params)
 	if err != nil {
 		return nil, err
 	}
@@ -457,6 +472,7 @@ func (c *Client) threadResumeParams(threadID, cwd string) map[string]any {
 	if config := c.automationMCPConfig(); len(config) > 0 {
 		params["config"] = config
 	}
+	c.applyThreadPermissions(params)
 	return params
 }
 
@@ -840,6 +856,7 @@ func (c *Client) threadStartParams(cwd string) map[string]any {
 	if config := c.automationMCPConfig(); len(config) > 0 {
 		params["config"] = config
 	}
+	c.applyThreadPermissions(params)
 	return params
 }
 
@@ -1035,9 +1052,11 @@ func (c *Client) handlePayload(payload map[string]any, generation uint64) {
 				c.mu.Unlock()
 				return
 			}
-			c.serverRequests[requestID] = params
+			key := c.serverRequestKey(id, generation)
+			c.serverRequests[key] = params
+			c.serverRequestIDs[key] = id
 			c.mu.Unlock()
-			c.broadcast(Event{Channel: "server_request", Method: method, Params: params, ID: id})
+			c.broadcast(Event{Channel: "server_request", Method: method, Params: params, ID: key})
 			return
 		}
 	}
@@ -1050,7 +1069,10 @@ func (c *Client) handlePayload(payload map[string]any, generation uint64) {
 				c.mu.Unlock()
 				return
 			}
-			delete(c.serverRequests, requestID)
+			key := c.serverRequestKey(params["requestId"], generation)
+			delete(c.serverRequests, key)
+			delete(c.serverRequestIDs, key)
+			params["requestId"] = key
 			c.mu.Unlock()
 		}
 	}
@@ -1105,5 +1127,18 @@ func uint64FromAny(value any) uint64 {
 		return typed
 	default:
 		return 0
+	}
+}
+
+// Server request IDs are local to a single App Server process.
+func (c *Client) serverRequestKey(rawID any, generation uint64) string {
+	return fmt.Sprintf("%s:%d:%s", c.requestNamespace, generation, rpcString(rawID))
+}
+
+// Saved thread permissions can override process defaults unless set on resume.
+func (c *Client) applyThreadPermissions(params map[string]any) {
+	if c.fullAccess {
+		params["approvalPolicy"] = "never"
+		params["sandbox"] = "danger-full-access"
 	}
 }

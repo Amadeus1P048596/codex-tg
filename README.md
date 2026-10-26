@@ -119,7 +119,9 @@ Telegram daemon 在自己的 `CODEX_HOME` 中维护一条可写的 live App Serv
 - `/plan <内容>` 或 `/reply --plan ...` 通过 App Server 的
   `collaborationMode.mode = plan` 真正启动 Plan Mode。
 - 结构化选择会显示为可点击按钮，并保持与原 thread/turn 的精确路由关系。
+- 需要权限审批时，单独发送带通知的消息，展示原因、命令和审批按钮；重启前的旧按钮不会误批新请求。
 - `/approve`、`/deny` 或卡片按钮可处理待确认操作。
+- 失败、取消或完成后的任务时长固定，不再随轮询继续增长。
 - 可以向已经路由的会话发送 Telegram 图片；机器人选择最大尺寸的 photo，下载上限为
   20 MiB，并以 App Server `localImage` 输入启动或 steer 当前 turn。
 - 图片可带说明文字；没有说明时会使用一个简短的默认图片分析提示。
@@ -337,6 +339,7 @@ ctr-go version
 | 环境变量 | 说明 |
 | --- | --- |
 | `CTR_GO_TELEGRAM_BOT_TOKEN` | Telegram Bot API token，必填且不得提交到 Git |
+| `CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED` | 设为 `true` 时，启动时清空默认快捷指令菜单；手动输入命令仍可使用，默认关闭 |
 | `CTR_GO_ALLOWED_USER_IDS` | 允许操作机器人的 Telegram user id 列表 |
 | `CTR_GO_ALLOWED_CHAT_IDS` | 可选的 chat id 白名单 |
 | `CTR_GO_DEFAULT_CWD` | Codex 默认工作目录 |
@@ -357,10 +360,12 @@ ctr-go version
 | `CTR_GO_DIAGNOSTIC_LOGS` | 是否输出结构化诊断事件 |
 | `CTR_GO_OBSERVER_POLL_SECONDS` | observer 轮询间隔，默认 5 秒 |
 | `CTR_GO_REQUEST_TIMEOUT_SECONDS` | App Server 请求超时，默认 30 秒 |
-| `CTR_GO_FULL_ACCESS` | 让子 App Server 使用 `approval_policy=never` 与 `danger-full-access`，默认关闭 |
+| `CTR_GO_FULL_ACCESS` | 默认开启；新建、恢复和派生会话统一使用 `approval_policy=never` 与 `danger-full-access` |
 
-`CTR_GO_FULL_ACCESS=true` 会显著扩大 Codex 对本机的操作权限，只应在理解风险且访问机器人
-受到严格白名单保护时启用。
+本 fork 默认 `CTR_GO_FULL_ACCESS=true`，会话与定时任务拥有完全访问权限且无需审批，机器人应保持严格白名单。
+设置 `CTR_GO_FULL_ACCESS=false` 可停止强制完全访问，改用 Codex 配置和会话已保存的权限；
+它不会自动降低此前已保存为完全访问的会话权限。归档会话在恢复时应用统一权限，归档状态不变。
+默认会注册 Telegram `/` 快捷菜单；`CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED=true` 可关闭提示，手动命令仍可使用。
 
 在 Windows 上，`CTR_GO_CODEX_BIN` 是首次引导和新版发现来源，不再是长期运行时的单点依赖。
 daemon 会使用 `CTR_GO_CODEX_RUNTIME_DIR` 内的完整私有副本启动两个 App Server；桌面端更新即使

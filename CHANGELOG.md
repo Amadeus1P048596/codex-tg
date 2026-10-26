@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Defaults this fork to full access without approvals and explicitly applies
+  the policy to new, resumed and forked sessions; keeps a configuration opt-out
+  and persists explicit defaults in the setup commands.
+- Scopes approval IDs to an App Server client and connection generation, keeps
+  original JSON-RPC ID types on responses, and rejects stale approval buttons.
+- Sends permission approvals as independent notifying messages with a reason,
+  command and supported decision buttons, with durable delivery deduplication.
+- Freezes terminal run duration across repeated polls after failure, cancellation
+  or completion, and invalidates pending approvals from previous processes.
+- Keeps slash-command menus enabled by default and adds an optional menu-disable
+  setting without removing typed command handlers.
+
 - Sends the completed result as a new notifying Telegram card, then removes the
   silent Working card after successful delivery, so completion remains visible
   without a separate one-line `Completed` notice.

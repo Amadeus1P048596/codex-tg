@@ -8,6 +8,9 @@
 - Telegram is the remote input/rendering surface.
 - SQLite state stays on the operator machine.
 - Bot access must be restricted with allowed user/chat ids.
+- This fork enables full access without approvals by default for new, resumed
+  and forked threads, including scheduled work. `CTR_GO_FULL_ACCESS=false`
+  stops forcing this policy; it does not downgrade existing saved permissions.
 
 ## Do Not Expose
 

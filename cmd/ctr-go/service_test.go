@@ -53,6 +53,8 @@ func TestServiceInstallNonInteractiveWritesConfigAndLaunchAgent(t *testing.T) {
 		`CTR_GO_CODEX_HOME=` + strconv.Quote(filepath.Join(home, "codex-home")),
 		`CTR_GO_AUTOMATIONS_DIR=` + strconv.Quote(filepath.Join(dir, "automations")),
 		`CTR_GO_NOTIFY_NEW_RUN="false"`,
+		`CTR_GO_FULL_ACCESS="true"`,
+		`CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED="false"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
@@ -391,4 +393,15 @@ func (f *fakeServiceRunner) Run(_ context.Context, name string, args ...string) 
 		return nil, errors.New("failed")
 	}
 	return []byte("ok"), nil
+}
+
+func TestServiceSetupPreservesPermissionOptOut(t *testing.T) {
+	existing := map[string]string{"CTR_GO_FULL_ACCESS": "false", "CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED": "true"}
+	values, err := collectServiceInstallValues(serviceInstallOptions{NonInteractive: true, TelegramToken: "123456:abcdefghijklmnopqrstuvwxyz", AllowedUserIDs: "42", CodexBin: os.Args[0], CTRGoBinaryPath: os.Args[0]}, existing, strings.NewReader(""), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["CTR_GO_FULL_ACCESS"] != "false" || values["CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED"] != "true" {
+		t.Fatal("reinstall overwrote operator settings")
+	}
 }

@@ -78,6 +78,8 @@ func TestRunInitWritesPrivateConfigAndRefusesOverwrite(t *testing.T) {
 		`CTR_GO_CODEX_HOME=` + strconv.Quote(filepath.Join(home, "codex-home")),
 		`CTR_GO_AUTOMATIONS_DIR=` + strconv.Quote(filepath.Join(dir, "automations")),
 		`CTR_GO_NOTIFY_NEW_RUN="false"`,
+		`CTR_GO_FULL_ACCESS="true"`,
+		`CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED="false"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config file missing %q:\n%s", want, text)

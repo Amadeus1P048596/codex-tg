@@ -42,3 +42,12 @@ Telegram edits do not provide a reliable per-edit notification contract. Therefo
 - This does not add per-chat notification profiles.
 - This does not make Telegram edits audible.
 - This does not change App Server protocol or Plan Mode routing.
+
+## Permission approval notification (2026-10-26)
+
+Permission approvals additionally send one independent audible message per
+request and target chat/topic, through the durable delivery queue. It includes
+the reason, bounded command text and routeable decision buttons. It is independent
+of the activity card and works for background threads. Completed or invalidated
+requests are discarded before queued delivery. The activity-card contract for
+structured Plan input is unchanged.

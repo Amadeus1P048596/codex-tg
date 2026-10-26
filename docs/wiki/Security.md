@@ -5,6 +5,10 @@
 ## Defaults
 
 - Codex App Server runs locally over stdio.
+- This fork defaults `CTR_GO_FULL_ACCESS=true`: new, resumed and forked threads
+  use `danger-full-access` and `approval_policy=never`. This also applies to
+  scheduled runs. Set the flag to `false` to stop forcing these overrides;
+  saved thread permissions are retained rather than automatically downgraded.
 - Telegram access is restricted by allowed user/chat ids.
 - SQLite state stays on the operator machine.
 - `ctr-go init` stores local configuration in `~/.codex-tg/config.env` by default.

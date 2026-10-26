@@ -196,6 +196,7 @@ func runServiceInstall(args []string, in io.Reader, out io.Writer) error {
 	_, _ = fmt.Fprintf(out, "  Telegram Scheduled tasks: %s\n", values["CTR_GO_AUTOMATIONS_DIR"])
 	_, _ = fmt.Fprintf(out, "  Codex binary: %s\n", values["CTR_GO_CODEX_BIN"])
 	_, _ = fmt.Fprintf(out, "  New run notifications: %s\n", values["CTR_GO_NOTIFY_NEW_RUN"])
+	_, _ = fmt.Fprintf(out, "  Full access: %s\n", values["CTR_GO_FULL_ACCESS"])
 	_, _ = fmt.Fprintln(out, "\nNext steps")
 	_, _ = fmt.Fprintln(out, "  ctr-go service status")
 	_, _ = fmt.Fprintln(out, "  ctr-go doctor")
@@ -246,6 +247,8 @@ func collectServiceInstallValues(opts serviceInstallOptions, existing map[string
 	values["CTR_GO_AUTOMATIONS_DIR"] = strings.TrimSpace(firstNonEmpty(opts.AutomationsDir, existing["CTR_GO_AUTOMATIONS_DIR"], config.DefaultAutomationsDir()))
 	values["CTR_GO_CODEX_BIN"] = strings.TrimSpace(firstNonEmpty(opts.CodexBin, existing["CTR_GO_CODEX_BIN"], codexBin))
 	values["CTR_GO_NOTIFY_NEW_RUN"] = strings.TrimSpace(firstNonEmpty(opts.NotifyNewRun, existing["CTR_GO_NOTIFY_NEW_RUN"], "true"))
+	values["CTR_GO_FULL_ACCESS"] = strings.TrimSpace(firstNonEmpty(existing["CTR_GO_FULL_ACCESS"], "true"))
+	values["CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED"] = strings.TrimSpace(firstNonEmpty(existing["CTR_GO_TELEGRAM_COMMAND_MENU_DISABLED"], "false"))
 	values["CTR_GO_CTR_GO_BIN"] = strings.TrimSpace(firstNonEmpty(opts.CTRGoBinaryPath, existing["CTR_GO_CTR_GO_BIN"]))
 	for _, key := range config.RuntimeEnvPassthroughKeys() {
 		if strings.TrimSpace(values[key]) != "" {

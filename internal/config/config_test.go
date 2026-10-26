@@ -299,3 +299,16 @@ func TestConfigFilePathOverride(t *testing.T) {
 		t.Fatalf("ConfigFilePath = %q, want %q", got, path)
 	}
 }
+
+func TestFullAccessDefaultsOnAndSupportsExplicitOptOut(t *testing.T) {
+	for _, value := range []string{"", "true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CTR_GO_CONFIG", filepath.Join(t.TempDir(), "missing.env"))
+			t.Setenv("CTR_GO_FULL_ACCESS", value)
+			cfg := FromEnv()
+			if cfg.FullAccess != (value != "false") {
+				t.Fatalf("FullAccess=%t for %q", cfg.FullAccess, value)
+			}
+		})
+	}
+}

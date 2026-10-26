@@ -615,6 +615,11 @@ func (s *Store) SavePendingApproval(ctx context.Context, approval model.PendingA
 	INSERT INTO pending_approvals(request_id, thread_id, turn_id, item_id, prompt_kind, question, status, telegram_message_id, payload_json, updated_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(request_id) DO UPDATE SET
+ thread_id = excluded.thread_id,
+ turn_id = excluded.turn_id,
+ item_id = excluded.item_id,
+ prompt_kind = excluded.prompt_kind,
+ question = excluded.question,
 		status = excluded.status,
 		telegram_message_id = excluded.telegram_message_id,
 		payload_json = excluded.payload_json,
@@ -858,4 +863,22 @@ func MustJSON(value any) string {
 		panic(fmt.Errorf("marshal payload: %w", err))
 	}
 	return string(payload)
+}
+
+// ListBindingTargetsForThread finds originating chats even before a card exists.
+func (s *Store) ListBindingTargetsForThread(ctx context.Context, threadID string) ([]model.ObserverTarget, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT chat_key,chat_id,topic_id FROM thread_bindings WHERE thread_id=?`, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var targets []model.ObserverTarget
+	for rows.Next() {
+		target := model.ObserverTarget{Enabled: true}
+		if err := rows.Scan(&target.ChatKey, &target.ChatID, &target.TopicID); err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, rows.Err()
 }

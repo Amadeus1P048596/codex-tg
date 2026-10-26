@@ -505,3 +505,46 @@ func TestBotDeliverDirectResponseSendsSilentMessage(t *testing.T) {
 		t.Fatalf("disable_notification = %#v, want true", captured["disable_notification"])
 	}
 }
+
+func TestBotStartCommandMenuDisabled(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(disabled), func(t *testing.T) {
+			called := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/getMe":
+					fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"username":"test_bot"}}`)
+				case "/setMyCommands":
+					called = true
+					var payload struct {
+						Commands []BotCommand `json:"commands"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Error(err)
+					}
+					if payload.Commands == nil {
+						t.Error("commands must be an array")
+					}
+					if disabled && len(payload.Commands) != 0 {
+						t.Error("disabled menu registered commands")
+					}
+					if !disabled && len(payload.Commands) == 0 {
+						t.Error("default menu is empty")
+					}
+					fmt.Fprint(w, `{"ok":true,"result":true}`)
+				default:
+					t.Errorf("unexpected method %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			bot := &Bot{cfg: config.Config{TelegramCommandMenuDisabled: disabled}, client: &Client{baseURL: server.URL, http: server.Client()}, logger: log.New(io.Discard, "", 0)}
+			if err := bot.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !called {
+				t.Fatal("command menu not synchronized")
+			}
+		})
+	}
+}
