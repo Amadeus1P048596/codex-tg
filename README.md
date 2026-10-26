@@ -318,6 +318,14 @@ Windows 和 Linux 当前建议使用自己的进程管理方式运行 `ctr-go da
 标准服务档位，`fast` 会发送快速档位；支持范围和额度消耗以
 [OpenAI Codex Speed 文档](https://developers.openai.com/docs/agent-configuration/speed)为准。
 
+## macOS 磁盘权限与重复部署
+
+macOS 安装包把 daemon 放在固定的 `codex-tg.app` 内，支持发布者使用同一签名身份构建；
+CLI 命令继续兼容。受管 Mac 可生成 MDM 的 PPPC 完全磁盘访问配置，减少远程部署时的手动操作。
+普通新 Mac 仍需要首次授权；本机手动授权记录不能通过 GitHub 复制到另一台机器。
+未配置发布签名的构建使用临时签名，不承诺更新后保留权限。已有独立二进制授权不会自动迁移。
+详见 [macOS 完全磁盘访问部署指南](docs/wiki/macOS-Full-Disk-Access.md)。
+
 ## 本地命令
 
 ```text

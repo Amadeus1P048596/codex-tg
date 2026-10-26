@@ -667,6 +667,10 @@ func renderLaunchAgentPlist(cfg launchAgentConfig) ([]byte, error) {
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
 	b.WriteString("<plist version=\"1.0\">\n<dict>\n")
 	plistString(&b, "Label", cfg.Label)
+	if filepath.Base(cfg.BinaryPath) == "ctr-go" && filepath.Base(filepath.Dir(cfg.BinaryPath)) == "MacOS" && filepath.Base(filepath.Dir(filepath.Dir(cfg.BinaryPath))) == "Contents" && filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(cfg.BinaryPath)))) == "codex-tg.app" {
+		b.WriteString("  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>tech.mideco.codex-tg.tray</string>\n  </array>\n")
+	}
+
 	b.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
 	for _, arg := range []string{cfg.BinaryPath, "daemon", "run"} {
 		b.WriteString("    <string>" + xmlEscape(arg) + "</string>\n")

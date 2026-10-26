@@ -33,6 +33,10 @@ jobs:
             echo "Potential private Windows local path found."
             exit 1
           fi
+      - name: Test macOS deployment policy generator
+        run: python3 scripts/test_macos_pppc.py
+      - name: Check macOS package script syntax
+        run: bash -n scripts/build-macos-pkg.sh
       - name: Test
         run: go test ./...
       - name: Build

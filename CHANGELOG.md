@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bundles the macOS daemon inside the app, retains the CLI as an exec wrapper,
+  and attributes packaged LaunchAgents to the app's stable bundle identity.
+- Supports inside-out distribution signing and signature verification for macOS
+  packages, and generates signature-bound Full Disk Access PPPC profiles for
+  approved MDM deployment. Unmanaged Macs still require initial local consent.
+
 - Defaults this fork to full access without approvals and explicitly applies
   the policy to new, resumed and forked sessions; keeps a configuration opt-out
   and persists explicit defaults in the setup commands.

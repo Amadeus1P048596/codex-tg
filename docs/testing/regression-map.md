@@ -817,3 +817,13 @@ ADR: `docs/adr/ADR-025-default-full-access.md`.
 - `cmd/ctr-go/main_test.go::TestRunInitWritesPrivateConfigAndRefusesOverwrite`
 - `cmd/ctr-go/service_test.go::TestServiceInstallNonInteractiveWritesConfigAndLaunchAgent`
 - `cmd/ctr-go/service_test.go::TestServiceSetupPreservesPermissionOptOut`
+
+## macOS disk-access packaging
+
+ADR: `docs/adr/ADR-026-macos-disk-access-packaging.md`.
+
+- `cmd/ctr-go/service_test.go::TestLaunchAgentAttributesBundledDaemonToApp`
+- `python3 scripts/test_macos_pppc.py`
+- Build a macOS pkg, inspect the bundled CLI/wrapper and verify its code signature.
+- The generator must reject ad-hoc builds rather than output a misleading policy.
+- Validate real consent retention and MDM delivery on appropriately authorized Macs.

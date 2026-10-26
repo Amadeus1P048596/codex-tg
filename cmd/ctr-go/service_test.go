@@ -405,3 +405,19 @@ func TestServiceSetupPreservesPermissionOptOut(t *testing.T) {
 		t.Fatal("reinstall overwrote operator settings")
 	}
 }
+
+func TestLaunchAgentAttributesBundledDaemonToApp(t *testing.T) {
+	for _, binary := range []string{"/Applications/codex-tg.app/Contents/MacOS/ctr-go", "/usr/local/bin/ctr-go"} {
+		data, err := renderLaunchAgentPlist(launchAgentConfig{Label: serviceLabel, BinaryPath: binary, ConfigPath: "/private/config.env"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundled := strings.Contains(binary, ".app/Contents/MacOS/")
+		if strings.Contains(string(data), "AssociatedBundleIdentifiers") != bundled {
+			t.Fatalf("incorrect app attribution for %s", binary)
+		}
+		if bundled && !strings.Contains(string(data), "tech.mideco.codex-tg.tray") {
+			t.Fatal("missing app identity")
+		}
+	}
+}

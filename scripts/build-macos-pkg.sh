@@ -25,13 +25,18 @@ for arch in $ARCHES; do
 
   env CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" \
     go build -trimpath -ldflags="-s -w" -buildvcs=false \
-    -o "$payload/usr/local/bin/ctr-go" "$ROOT_DIR/cmd/ctr-go"
+    -o "$app/Contents/MacOS/ctr-go" "$ROOT_DIR/cmd/ctr-go"
 
   env CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
     go build -trimpath -ldflags="-s -w" -buildvcs=false \
     -o "$app/Contents/MacOS/ctr-go-tray" "$ROOT_DIR/cmd/ctr-go-tray"
 
-  chmod 0755 "$payload/usr/local/bin/ctr-go" "$app/Contents/MacOS/ctr-go-tray"
+  # Keep the actual daemon inside the app for macOS privacy attribution.
+  cat >"$payload/usr/local/bin/ctr-go" <<'SHIM'
+#!/bin/sh
+exec /Applications/codex-tg.app/Contents/MacOS/ctr-go "$@"
+SHIM
+  chmod 0755 "$payload/usr/local/bin/ctr-go" "$app/Contents/MacOS/ctr-go" "$app/Contents/MacOS/ctr-go-tray"
   cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -60,8 +65,31 @@ PLIST
   find "$payload" -name '._*' -delete
   xattr -cr "$payload" 2>/dev/null || true
 
-  pkgbuild \
+  # Sign nested executable first, then the app. No private signing material is
+  # part of this repository; use the same distribution identity across upgrades.
+  identity="${MACOS_CODESIGN_IDENTITY:--}"
+  signing_args=(--force --sign "$identity")
+  if [[ "$identity" != "-" ]]; then
+    signing_args+=(--timestamp --options runtime)
+  else
+    echo "Development build: ad-hoc signing does not guarantee retained Full Disk Access." >&2
+  fi
+  codesign "${signing_args[@]}" --identifier tech.mideco.codex-tg.daemon "$app/Contents/MacOS/ctr-go"
+  codesign "${signing_args[@]}" --identifier tech.mideco.codex-tg.tray "$app"
+  xattr -cr "$payload"
+  codesign --verify --deep --strict "$app"
+  mkdir -p "$DIST_DIR/apps/$arch"
+  ditto "$app" "$DIST_DIR/apps/$arch/codex-tg.app"
+
+  installer_args=(pkgbuild)
+  if [[ -n "${MACOS_INSTALLER_IDENTITY:-}" ]]; then
+    installer_args+=(--sign "$MACOS_INSTALLER_IDENTITY")
+  fi
+  pkgbuild --analyze --root "$payload" "$workdir/components.plist"
+  /usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$workdir/components.plist"
+  "${installer_args[@]}" \
     --root "$payload" \
+    --component-plist "$workdir/components.plist" \
     --identifier "tech.mideco.codex-tg" \
     --version "$PKG_VERSION" \
     --install-location "/" \
