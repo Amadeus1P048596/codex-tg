@@ -39,6 +39,10 @@ func TestServeMCPListsAndCallsAutomationTool(t *testing.T) {
 	if result := initialize["result"].(map[string]any); result["protocolVersion"] != "2025-06-18" {
 		t.Fatalf("initialize result = %#v", result)
 	}
+	instructions, _ := initialize["result"].(map[string]any)["instructions"].(string)
+	if !strings.Contains(instructions, "launchctl bootout") || !strings.Contains(instructions, "independent") {
+		t.Fatalf("missing hosted maintenance safety instructions: %q", instructions)
+	}
 	listResult := list["result"].(map[string]any)
 	tools := listResult["tools"].([]any)
 	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "automation_update" {

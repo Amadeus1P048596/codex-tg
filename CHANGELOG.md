@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Rejects lifecycle-changing CLI commands inside hosted Codex tasks before any
+  service/config mutation, while preserving status inspection. Runtime MCP
+  instructions warn against raw self-unload and non-idempotent migrations.
+- Restarts externally maintained macOS jobs with launchd kickstart instead of
+  bootout/bootstrap, retaining service registration if restart fails.
+
 - Bundles the macOS daemon inside the app, retains the CLI as an exec wrapper,
   and attributes packaged LaunchAgents to the app's stable bundle identity.
 - Supports inside-out distribution signing and signature verification for macOS

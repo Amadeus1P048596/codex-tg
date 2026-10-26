@@ -931,19 +931,19 @@ func (c *Client) buildCommand() (*exec.Cmd, error) {
 
 func appServerEnvironment(codexHome string) []string {
 	codexHome = strings.TrimSpace(codexHome)
-	if codexHome == "" {
-		return nil
-	}
 	env := os.Environ()
 	out := make([]string, 0, len(env)+1)
 	for _, pair := range env {
 		key, _, ok := strings.Cut(pair, "=")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "CODEX_HOME") {
+		if ok && ((codexHome != "" && strings.EqualFold(strings.TrimSpace(key), "CODEX_HOME")) || strings.EqualFold(strings.TrimSpace(key), "CTR_GO_HOSTED_TASK")) {
 			continue
 		}
 		out = append(out, pair)
 	}
-	return append(out, "CODEX_HOME="+codexHome)
+	if codexHome != "" {
+		out = append(out, "CODEX_HOME="+codexHome)
+	}
+	return append(out, "CTR_GO_HOSTED_TASK=1")
 }
 
 func appServerArgs(listenURL string, fullAccess bool) []string {

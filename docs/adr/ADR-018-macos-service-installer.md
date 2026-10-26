@@ -42,3 +42,21 @@ runs setup in their user context.
 - Proxy-dependent deployments remain compatible with the `CTR_GO_CONFIG`-only
 LaunchAgent contract.
 - Existing environment-only and manual daemon workflows keep working.
+
+## Hosted-task maintenance boundary (2026-10-26)
+
+App Server child environments carry `CTR_GO_HOSTED_TASK=1`. CLI start, stop,
+restart, install and uninstall refuse to mutate service lifecycle when invoked
+inside that task environment, before issuing launchctl or writing configuration.
+Status remains available. The parent's environment is not modified.
+
+An external restart uses `launchctl kickstart -k` for an already registered job,
+without bootout/bootstrap. If kickstart fails, report the failure and retain the
+job registration. An unloaded service may still be started normally.
+
+The runtime MCP initialization explains that raw bootout, kill or self-restarting
+migration scripts are also unsafe, and that already-applied migrations should be
+no-ops. This is an operational guard, not a security sandbox: arbitrary full-access
+commands can bypass the CLI and terminate their own host. Hosted maintenance is
+not transparently detached or drained; operators should finish active turns and
+use an independent maintenance process.

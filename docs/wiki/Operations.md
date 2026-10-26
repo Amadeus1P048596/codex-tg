@@ -49,14 +49,27 @@ written directly into the LaunchAgent plist.
 
 Avoid forced daemon restarts while a Telegram-originated run is active. The daemon owns the local App Server stdio session used by that run; killing the daemon closes that transport and can make the active turn appear as `interrupted`.
 
-Until a safe restart command exists, prefer this order:
+For planned restarts, use this order:
 
 1. Check the active run state in Telegram or with `go run ./cmd/ctr-go status`.
 2. Wait for the active Telegram-originated turn to finish.
 3. Rebuild or reinstall the binary.
 4. Restart the daemon with `ctr-go service restart` or the tray menu.
 
-Future restart work should implement a drain/guard path that refuses or delays restart while Telegram-origin turns are active. More invasive designs, such as a separate App Server broker process or reattaching to a turn after daemon death, require a separate ADR.
+The supported CLI rejects `service start`, `stop`, `restart`, `install` and
+`uninstall` inside a hosted task (`CTR_GO_HOSTED_TASK=1`), before lifecycle or
+configuration mutations. Read-only status remains available. Run lifecycle
+maintenance from an independent process after the current task finishes.
+External restart retains launchd registration and uses `kickstart -k`; a failure
+does not unload the job. This does not provide task draining or automatic task
+continuation after restart.
+
+Do not run `launchctl bootout`, `kill` or old stop-and-reload migration scripts
+from the task being maintained. With full access, arbitrary commands can bypass
+the CLI guard, so the runtime instructions also explain this boundary. Permission
+migrations that are already applied should return success without restarting.
+More invasive designs, such as a separate App Server broker process, require a
+separate ADR.
 
 ## Windows Codex Runtime Failover
 

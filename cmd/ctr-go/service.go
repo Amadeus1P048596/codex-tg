@@ -46,6 +46,12 @@ func runService(args []string, in io.Reader, out io.Writer) error {
 		return nil
 	}
 	switch args[0] {
+	case "start", "stop", "restart", "install", "uninstall":
+		if err := guardHostedServiceMutation(); err != nil {
+			return err
+		}
+	}
+	switch args[0] {
 	case "install":
 		return runServiceInstall(args[1:], in, out)
 	case "start":
@@ -123,6 +129,9 @@ func parseServiceInstallOptions(args []string) (serviceInstallOptions, error) {
 }
 
 func runServiceInstall(args []string, in io.Reader, out io.Writer) error {
+	if err := guardHostedServiceMutation(); err != nil {
+		return err
+	}
 	opts, err := parseServiceInstallOptions(args)
 	if err != nil {
 		return err
@@ -468,6 +477,9 @@ func validateServiceValues(values map[string]string) (map[string]string, error) 
 }
 
 func runServiceStart(out io.Writer) error {
+	if err := guardHostedServiceMutation(); err != nil {
+		return err
+	}
 	if serviceGOOS != "darwin" {
 		return errors.New("ctr-go service is macOS-only in v0.4.0")
 	}
@@ -528,6 +540,9 @@ func runServiceStop(out io.Writer) error {
 }
 
 func serviceStop() error {
+	if err := guardHostedServiceMutation(); err != nil {
+		return err
+	}
 	if serviceGOOS != "darwin" {
 		return errors.New("ctr-go service is macOS-only in v0.4.0")
 	}
@@ -542,11 +557,25 @@ func serviceStop() error {
 }
 
 func runServiceRestart(out io.Writer) error {
-	_, _ = fmt.Fprintln(out, "Restarting can interrupt an active Telegram-origin run.")
-	if err := runServiceStop(out); err != nil {
+	if err := guardHostedServiceMutation(); err != nil {
 		return err
 	}
-	return runServiceStart(out)
+	if serviceGOOS != "darwin" {
+		return errors.New("ctr-go service is macOS-only in v0.4.0")
+	}
+	_, _ = fmt.Fprintln(out, "Restarting can interrupt an active Telegram-origin run.")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	target := launchctlTarget()
+	if !serviceIsLoaded(ctx, target) {
+		return runServiceStart(out)
+	}
+	// Keep registration owned by launchd even if the caller exits or is killed.
+	if _, err := serviceRunner.Run(ctx, "launchctl", "kickstart", "-k", target+"/"+serviceLabel); err != nil {
+		return fmt.Errorf("launchctl restart failed; service registration was retained: %w", err)
+	}
+	_, _ = fmt.Fprintln(out, "codex-tg service restart requested without unloading the job.")
+	return nil
 }
 
 func runServiceStatus(out io.Writer) error {
@@ -597,6 +626,9 @@ func runServiceDisableLogin(out io.Writer) error {
 }
 
 func runServiceUninstall(args []string, out io.Writer) error {
+	if err := guardHostedServiceMutation(); err != nil {
+		return err
+	}
 	keepConfig := false
 	fs := flag.NewFlagSet("ctr-go service uninstall", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -849,4 +881,11 @@ func printServiceUsage(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "  ctr-go service enable-login")
 	_, _ = fmt.Fprintln(out, "  ctr-go service disable-login")
 	_, _ = fmt.Fprintln(out, "  ctr-go service uninstall [--keep-config]")
+}
+
+func guardHostedServiceMutation() error {
+	if os.Getenv("CTR_GO_HOSTED_TASK") == "1" {
+		return errors.New("service lifecycle changes are blocked inside a hosted codex-tg task: they would terminate the task's own host. Finish the task and perform maintenance from an independent process; do not bypass this guard with launchctl bootout or kill")
+	}
+	return nil
 }

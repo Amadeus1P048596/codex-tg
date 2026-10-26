@@ -521,3 +521,22 @@ func TestFullAccessAppliesToNewAndResumedThreads(t *testing.T) {
 		}
 	}
 }
+
+func TestAppServerEnvironmentMarksHostedTasksWithoutChangingParent(t *testing.T) {
+	t.Setenv("CTR_GO_HOSTED_TASK", "")
+	for _, home := range []string{"", t.TempDir()} {
+		env := appServerEnvironment(home)
+		count := 0
+		for _, value := range env {
+			if value == "CTR_GO_HOSTED_TASK=1" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("hosted marker count=%d for home %q", count, home)
+		}
+	}
+	if os.Getenv("CTR_GO_HOSTED_TASK") != "" {
+		t.Fatal("parent marked as hosted task")
+	}
+}

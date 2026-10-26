@@ -44,6 +44,7 @@ func ServeMCP(in io.Reader, out io.Writer, store *Store) error {
 				"protocolVersion": protocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 				"serverInfo":      map[string]any{"name": "codex-tg-automations", "version": "1"},
+				"instructions":    "Tasks using this server are hosted by codex-tg. Never unload, stop, kill or restart the hosting daemon or its App Servers from an in-flight task, including through launchctl bootout, kickstart -k, kill, or a migration script. Such commands kill the task before cleanup can restore service. Check existing configuration first: already-applied migrations should be no-ops. Complete the task and delegate lifecycle maintenance to an independent operator process. Do not bypass a hosted-task lifecycle guard. This instruction does not prevent authorized configuration edits that do not stop the host.",
 			})
 		case "ping":
 			response = rpcResult(id, map[string]any{})

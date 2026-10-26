@@ -315,7 +315,6 @@ func TestServiceLifecycleUsesLaunchctlRunner(t *testing.T) {
 	for _, want := range []string{
 		"launchctl bootstrap gui/501 " + paths.ServicePlistPath,
 		"launchctl kickstart -k gui/501/" + serviceLabel,
-		"launchctl bootout gui/501/" + serviceLabel,
 		"launchctl print gui/501/" + serviceLabel,
 	} {
 		if !strings.Contains(joined, want) {
@@ -418,6 +417,51 @@ func TestLaunchAgentAttributesBundledDaemonToApp(t *testing.T) {
 		}
 		if bundled && !strings.Contains(string(data), "tech.mideco.codex-tg.tray") {
 			t.Fatal("missing app identity")
+		}
+	}
+}
+
+func TestHostedTaskRejectsLifecycleMutationBeforeAnySideEffect(t *testing.T) {
+	t.Setenv("CTR_GO_HOSTED_TASK", "1")
+	fake := &fakeServiceRunner{loaded: true}
+	oldRunner, oldGOOS := serviceRunner, serviceGOOS
+	serviceGOOS = "darwin"
+	serviceRunner = fake
+	defer func() { serviceRunner = oldRunner; serviceGOOS = oldGOOS }()
+	for _, action := range []string{"start", "stop", "restart", "install", "uninstall"} {
+		err := runService([]string{action}, strings.NewReader(""), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "hosted") {
+			t.Fatalf("%s did not explain hosted task restriction: %v", action, err)
+		}
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("lifecycle guard ran commands: %#v", fake.calls)
+	}
+	var out bytes.Buffer
+	if err := runServiceStatus(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Loaded:") {
+		t.Fatal("read-only status unavailable")
+	}
+}
+
+func TestRestartKeepsRegisteredJobWhenKickstartFails(t *testing.T) {
+	t.Setenv("CTR_GO_HOSTED_TASK", "")
+	fake := &fakeServiceRunner{loaded: true, fail: map[string]error{"kickstart": errors.New("restart failed")}}
+	oldRunner, oldGOOS := serviceRunner, serviceGOOS
+	serviceRunner = fake
+	serviceGOOS = "darwin"
+	defer func() { serviceRunner = oldRunner; serviceGOOS = oldGOOS }()
+	if err := runServiceRestart(io.Discard); err == nil {
+		t.Fatal("kickstart failure hidden")
+	}
+	if !fake.loaded {
+		t.Fatal("failed restart unloaded job")
+	}
+	for _, call := range fake.calls {
+		if strings.Contains(call, "bootout") || strings.Contains(call, "bootstrap") {
+			t.Fatalf("restart unregisters job: %s", call)
 		}
 	}
 }

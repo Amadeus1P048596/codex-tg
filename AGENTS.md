@@ -27,6 +27,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Use TDD for non-trivial behavior changes and bug fixes: failing or updated test, minimal implementation, refactor, targeted checks.
 - Use an independent fresh-context reviewer for meaningful changes when the current environment and user instructions permit it. Otherwise perform a structured self-review of the issue or brief, diff, tests, ADRs/rules, and validation output, and state that the review was not independent.
 - Do not spawn subagents unless the current environment and user instructions permit it. When permitted, delegate only concrete, bounded, independent work that materially improves latency or quality.
+- A task hosted by codex-tg must not unload, kill or restart its own daemon/App Server, including via raw launchctl or a migration script. Finish the task and use an independent maintenance process; do not bypass a hosted-task lifecycle guard. Already-applied migrations must be idempotent.
 - Prepare the candidate and validation plan without mutating the live service. Restart the live daemon or send real Telegram QA messages only with explicit current operator authorization.
 - After compaction, context reset, or handoff, reread this file first, then pull only the docs called out by the Context Pull Map.
 

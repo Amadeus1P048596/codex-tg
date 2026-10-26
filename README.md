@@ -342,6 +342,10 @@ ctr-go version
 
 从源码运行时，把 `ctr-go` 替换为 `go run ./cmd/ctr-go` 即可。
 
+TG 任务内不能直接运行 `service start/stop/restart/install/uninstall` 停掉承载自己的服务；
+命令会在修改前返回明确提示。请先结束任务，再由独立维护进程操作。外部重启使用 launchd
+`kickstart` 保留服务注册，失败时也不会把服务卸载。完全访问下直接执行系统命令仍可能停掉宿主。
+
 ## 重要配置
 
 | 环境变量 | 说明 |

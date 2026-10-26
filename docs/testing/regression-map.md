@@ -827,3 +827,15 @@ ADR: `docs/adr/ADR-026-macos-disk-access-packaging.md`.
 - Build a macOS pkg, inspect the bundled CLI/wrapper and verify its code signature.
 - The generator must reject ad-hoc builds rather than output a misleading policy.
 - Validate real consent retention and MDM delivery on appropriately authorized Macs.
+
+## Hosted service self-maintenance guard
+
+ADR: `docs/adr/ADR-018-macos-service-installer.md` hosted-task addendum.
+
+- `cmd/ctr-go/service_test.go::TestHostedTaskRejectsLifecycleMutationBeforeAnySideEffect`
+- `cmd/ctr-go/service_test.go::TestRestartKeepsRegisteredJobWhenKickstartFails`
+- `internal/appserver/client_test.go::TestAppServerEnvironmentMarksHostedTasksWithoutChangingParent`
+- `internal/automation/mcp_test.go::TestServeMCPListsAndCallsAutomationTool`
+
+Do not exercise destructive lifecycle commands against the live service hosting
+an in-flight task. Full-access arbitrary scripts remain outside the CLI guard.
