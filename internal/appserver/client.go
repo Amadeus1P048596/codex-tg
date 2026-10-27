@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/control"
+	"github.com/mideco-tech/codex-tg/internal/credentials"
 	"github.com/mideco-tech/codex-tg/internal/version"
 )
 
@@ -37,6 +38,12 @@ type rpcResponse struct {
 }
 
 type Client struct {
+	authMu                              sync.Mutex
+	authSource                          credentials.Source
+	authToken, authRejected, authStatus string
+	authGeneration                      uint64
+	authCancel                          context.CancelFunc
+
 	codexBin       string
 	codexHome      string
 	listenURL      string
@@ -69,6 +76,8 @@ type Client struct {
 }
 
 type ClientOptions struct {
+	AuthSourceFile    string
+	AuthAccountID     string
 	FullAccess        bool
 	CodexHome         string
 	AutomationsDir    string
@@ -85,6 +94,7 @@ func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration, op
 		automationCommand, _ = os.Executable()
 	}
 	return &Client{
+		authSource:       credentials.Source{Path: clientOptions.AuthSourceFile, AccountID: clientOptions.AuthAccountID},
 		codexBin:         codexBin,
 		codexHome:        strings.TrimSpace(clientOptions.CodexHome),
 		listenURL:        listenURL,
@@ -112,6 +122,12 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.started {
 		c.mu.Unlock()
 		return nil
+	}
+	if c.authSource.Path != "" {
+		if err := c.validateCredentialIsolation(); err != nil {
+			c.mu.Unlock()
+			return err
+		}
 	}
 	if err := c.preparePersistedThreadRolloutPaths(); err != nil {
 		c.mu.Unlock()
@@ -171,6 +187,14 @@ func (c *Client) Start(ctx context.Context) error {
 		_ = c.closeRunning()
 		return err
 	}
+	if c.authSource.Path != "" {
+		authCtx, cancel := context.WithCancel(context.Background())
+		c.mu.Lock()
+		c.authCancel = cancel
+		c.mu.Unlock()
+		_ = c.syncCredentials(ctx, generation)
+		go c.credentialWatchdog(authCtx, generation)
+	}
 	return nil
 }
 
@@ -185,6 +209,10 @@ func (c *Client) closeRunning() error {
 	if !c.started {
 		c.mu.Unlock()
 		return nil
+	}
+	if c.authCancel != nil {
+		c.authCancel()
+		c.authCancel = nil
 	}
 	cmd := c.cmd
 	stdin := c.stdin
@@ -224,7 +252,15 @@ func (c *Client) Subscribe() <-chan Event {
 }
 
 func (c *Client) Request(ctx context.Context, method string, params map[string]any) (any, error) {
+	return c.requestForGeneration(ctx, method, params, 0)
+}
+
+func (c *Client) requestForGeneration(ctx context.Context, method string, params map[string]any, generation uint64) (any, error) {
 	c.mu.Lock()
+	if generation != 0 && c.generation != generation {
+		c.mu.Unlock()
+		return nil, errors.New("app-server session changed before request")
+	}
 	if !c.started || c.stdin == nil {
 		c.mu.Unlock()
 		return nil, errors.New("app-server is not running")
@@ -481,6 +517,12 @@ func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string, o
 }
 
 func (c *Client) TurnStartInputs(ctx context.Context, threadID string, inputs []control.UserInput, cwd string, options TurnStartOptions) (map[string]any, error) {
+	c.mu.Lock()
+	generation := c.generation
+	c.mu.Unlock()
+	if err := c.syncCredentials(ctx, generation); err != nil {
+		return nil, err
+	}
 	resolved, err := c.resolveTurnStartOptions(ctx, options)
 	if err != nil {
 		return nil, err
@@ -906,25 +948,33 @@ func (c *Client) StderrTail() []string {
 }
 
 func (c *Client) buildCommand() (*exec.Cmd, error) {
+	if c.authSource.Path != "" {
+		if err := c.validateCredentialIsolation(); err != nil {
+			return nil, err
+		}
+	}
 	executable, err := exec.LookPath(c.codexBin)
 	if err != nil {
 		executable = c.codexBin
 	}
 	args := appServerArgs(c.listenURL, c.fullAccess)
+	if c.authSource.Path != "" {
+		args = append([]string{"-c", `cli_auth_credentials_store="ephemeral"`}, args...)
+	}
 	if runtime.GOOS == "windows" {
 		ext := strings.ToLower(filepath.Ext(executable))
 		if ext == ".cmd" || ext == ".bat" {
 			command := strings.Join(append([]string{executable}, args...), " ")
 			cmd := exec.Command(os.Getenv("ComSpec"), "/d", "/c", command)
 			cmd.Dir = c.cwd
-			cmd.Env = appServerEnvironment(c.codexHome)
+			cmd.Env = c.childEnvironment()
 			configureHiddenProcess(cmd)
 			return cmd, nil
 		}
 	}
 	cmd := exec.Command(executable, args...)
 	cmd.Dir = c.cwd
-	cmd.Env = appServerEnvironment(c.codexHome)
+	cmd.Env = c.childEnvironment()
 	configureHiddenProcess(cmd)
 	return cmd, nil
 }
@@ -1042,6 +1092,10 @@ func (c *Client) handlePayload(payload map[string]any, generation uint64) {
 			return
 		}
 		if method, ok := payload["method"].(string); ok {
+			if method == "account/chatgptAuthTokens/refresh" && c.authSource.Path != "" {
+				go c.refreshCredentials(id, asMap(payload["params"]), generation)
+				return
+			}
 			requestID := rpcString(id)
 			if requestID == "" {
 				return

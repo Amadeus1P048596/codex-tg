@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased: credential watchdog
+
+- Add opt-in macOS credential watchdog inside the existing daemon: external
+  access-token login, periodic rotation detection, refresh-request handling,
+  account pinning, isolated ephemeral storage and sanitized `/status` health.
+- Add private configuration helper and regression tests. No automatic source
+  refresh, task replay, or live deployment.
+
 ## Unreleased
 
 - Rejects lifecycle-changing CLI commands inside hosted Codex tasks before any

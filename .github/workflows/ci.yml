@@ -35,6 +35,8 @@ jobs:
           fi
       - name: Test macOS deployment policy generator
         run: python3 scripts/test_macos_pppc.py
+      - name: Test macOS credential watchdog configuration
+        run: python3 scripts/test_macos_auth_watchdog.py
       - name: Check macOS package script syntax
         run: bash -n scripts/build-macos-pkg.sh
       - name: Test

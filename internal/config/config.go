@@ -45,6 +45,8 @@ func (p Paths) Ensure() error {
 }
 
 type Config struct {
+	AuthSourceFile              string
+	AuthAccountID               string
 	Paths                       Paths
 	CodexBin                    string
 	CodexHome                   string
@@ -141,6 +143,8 @@ func fromSource(source envSource) Config {
 		Paths:                       paths,
 		CodexBin:                    codexBin,
 		CodexHome:                   source.path("CTR_GO_CODEX_HOME", ""),
+		AuthSourceFile:              source.path("CTR_GO_AUTH_SOURCE_FILE", ""),
+		AuthAccountID:               source.get("CTR_GO_AUTH_ACCOUNT_ID"),
 		ManagedCodexRuntime:         source.bool("CTR_GO_CODEX_RUNTIME_MANAGED", runtime.GOOS == "windows"),
 		CodexRuntimeDir:             source.path("CTR_GO_CODEX_RUNTIME_DIR", filepath.Join(paths.Home, "codex-runtime")),
 		CodexRuntimeSyncInterval:    source.durationSeconds("CTR_GO_CODEX_RUNTIME_SYNC_SECONDS", 6*time.Hour),

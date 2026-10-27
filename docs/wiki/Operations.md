@@ -126,3 +126,9 @@ scheduled time intentionally waits for the next matching slot.
 When upgrading from ADR-022, move only Telegram-created `cron` definitions out
 of the Desktop directory, update `CTR_GO_AUTOMATIONS_DIR`, and leave Desktop
 heartbeat tasks in place. Do not point both clients at the same task store.
+
+## Credential Watchdog
+
+See [macOS credential watchdog](macOS-Credential-Watchdog.md) for explicit setup,
+recovery behavior and limits. It runs within the existing daemon, uses external
+access tokens, and never copies refresh tokens or restarts active tasks.

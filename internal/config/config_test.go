@@ -312,3 +312,22 @@ func TestFullAccessDefaultsOnAndSupportsExplicitOptOut(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialWatchdogConfigurationIsExplicit(t *testing.T) {
+	cfg := fromSource(envSource{file: map[string]string{}})
+	if cfg.AuthSourceFile != "" || cfg.AuthAccountID != "" {
+		t.Fatal("watchdog enabled by default")
+	}
+	t.Setenv("CTR_GO_CONFIG", filepath.Join(t.TempDir(), "missing.env"))
+	p := filepath.Join(t.TempDir(), "auth.json")
+	t.Setenv("CTR_GO_AUTH_SOURCE_FILE", p)
+	t.Setenv("CTR_GO_AUTH_ACCOUNT_ID", "private-account-marker")
+	cfg = FromEnv()
+	if cfg.AuthSourceFile != p || cfg.AuthAccountID != "private-account-marker" {
+		t.Fatal("watchdog configuration lost")
+	}
+	b, _ := json.Marshal(cfg)
+	if strings.Contains(string(b), "private-account-marker") {
+		t.Fatal("account pin disclosed in diagnostics")
+	}
+}

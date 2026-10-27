@@ -153,6 +153,8 @@ func New(cfg config.Config) (*Service, error) {
 	service.liveFactory = func() Session {
 		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout, appserver.ClientOptions{
 			FullAccess:     cfg.FullAccess,
+			AuthSourceFile: cfg.AuthSourceFile,
+			AuthAccountID:  cfg.AuthAccountID,
 			CodexHome:      cfg.CodexHome,
 			AutomationsDir: cfg.AutomationsDir,
 		})
@@ -160,6 +162,8 @@ func New(cfg config.Config) (*Service, error) {
 	service.pollFactory = func() Session {
 		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout, appserver.ClientOptions{
 			FullAccess:     cfg.FullAccess,
+			AuthSourceFile: cfg.AuthSourceFile,
+			AuthAccountID:  cfg.AuthAccountID,
 			CodexHome:      cfg.CodexHome,
 			AutomationsDir: cfg.AutomationsDir,
 		})
@@ -295,6 +299,7 @@ func (s *Service) StatusSnapshot(ctx context.Context, chatID, topicID int64) (st
 	pollConnected := s.pollConnected
 	startedAt := s.startedAt
 	lastError := s.lastError
+	live := s.live
 	s.mu.RUnlock()
 	lines := []string{
 		"Go core status",
@@ -306,6 +311,9 @@ func (s *Service) StatusSnapshot(ctx context.Context, chatID, topicID int64) (st
 		fmt.Sprintf("Tracked threads: %d", len(boundIDs)+threadCount),
 		fmt.Sprintf("Cached threads: %d", threadCount),
 		fmt.Sprintf("Delivery backlog: %d", backlog),
+	}
+	if auth, ok := live.(interface{ CredentialStatus() string }); ok {
+		lines = append(lines, "Credential watchdog: "+auth.CredentialStatus())
 	}
 	switch {
 	case configured && globalObserver != nil && globalObserver.Enabled:

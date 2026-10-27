@@ -402,3 +402,18 @@ Do not commit Telegram user sessions, chat/thread ids, raw message ids, raw logs
   repository secret/local-path scans passed.
 - A complete local bundle was staged and byte hashes matched the source. Live
   cutover remains intentionally pending explicit restart authorization.
+
+## 2026-10-27 macOS credential watchdog
+
+- Added access-token source, external login/refresh recovery, expiry/account
+  guards, pre-turn checks and private configuration helper. See ADR-027.
+- Focused Go race tests and Python configuration tests passed. Real CLI
+  `0.163.0-alpha.10.2` passed the opt-in isolated account/rateLimits probe without
+  persisting auth.json; no model turn or Telegram message was sent.
+- Full Go build passed. Full Go tests retain five previously reproduced local
+  baseline failures: three Windows rollout-path normalization tests and two
+  Windows managed-bundle selection tests on macOS. No new test failures.
+- Structured self-review covered credential ownership, process generations,
+  source/account failure paths, diagnostics and deployment boundaries. It was
+  not an independent review. No live daemon binary/config was replaced or
+  restarted; deployment and actual Telegram UI verification remain pending.

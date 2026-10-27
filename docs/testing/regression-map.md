@@ -839,3 +839,17 @@ ADR: `docs/adr/ADR-018-macos-service-installer.md` hosted-task addendum.
 
 Do not exercise destructive lifecycle commands against the live service hosting
 an in-flight task. Full-access arbitrary scripts remain outside the CLI guard.
+
+## Credential watchdog
+
+ADR: `docs/adr/ADR-027-credential-watchdog.md`.
+
+- `internal/credentials/source_test.go`: bounded source parsing, pinned account,
+  expiry margin, rotation, missing source and sanitized errors.
+- `internal/appserver/credentials_test.go`: external login and refresh, unchanged
+  rejected token, recovery, stale generation, pre-turn guard, isolated ephemeral
+  storage, no inherited API-key fallback, optional real CLI account probe.
+- `internal/config/config_test.go::TestCredentialWatchdogConfigurationIsExplicit`:
+  opt-in settings and account-pin omission from diagnostics.
+- `scripts/test_macos_auth_watchdog.py`: idempotent atomic private configuration,
+  preservation of source/config, no access/refresh-token copy.

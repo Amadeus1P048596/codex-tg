@@ -259,6 +259,10 @@ $env:CTR_GO_CODEX_HOME = "C:\Users\you\.codex-tg\codex-home"
 $env:CTR_GO_AUTOMATIONS_DIR = "C:\Users\you\.codex-tg\automations"
 ```
 
+macOS 可选启用[登录凭据 watchdog](docs/wiki/macOS-Credential-Watchdog.md)：
+由既有登录端维护凭据，codex-tg 自动加载更新后的访问令牌，不复制刷新令牌。
+需要更新 daemon 并显式配置；登录端本身失效时仍需重新登录。
+
 ### 3. 启动守护进程
 
 ```powershell
